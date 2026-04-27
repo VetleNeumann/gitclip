@@ -33,6 +33,10 @@ jobs:
         run: npm --workspace mcp run build
 
       - name: Run tests
+        env:
+          # Live GitHub integration test relies on unauthenticated API quota,
+          # which is shared across Actions runner IPs and routinely 403s.
+          GITCLIP_SKIP_LIVE: '1'
         run: npm test
 
       - name: Build web
