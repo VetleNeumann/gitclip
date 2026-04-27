@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { GeneratedScripts } from '../lib/scriptGen';
 
 interface Props {
@@ -7,10 +7,23 @@ interface Props {
   targetSha: string;
 }
 
+const TAB_KEY = 'gitclip.shellTab';
+
+function loadTab(): 'bash' | 'powershell' {
+  const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(TAB_KEY) : null;
+  return saved === 'powershell' ? 'powershell' : 'bash';
+}
+
 export function SyncOutput({ scripts, onApplied, targetSha }: Props) {
-  const [tab, setTab] = useState<'bash' | 'powershell'>('bash');
+  const [tab, setTabState] = useState<'bash' | 'powershell'>(() => loadTab());
   const [copied, setCopied] = useState(false);
   const text = tab === 'bash' ? scripts.bash : scripts.powershell;
+
+  useEffect(() => {
+    localStorage.setItem(TAB_KEY, tab);
+  }, [tab]);
+
+  const setTab = (t: 'bash' | 'powershell') => setTabState(t);
 
   const copy = async () => {
     await navigator.clipboard.writeText(text);

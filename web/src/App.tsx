@@ -122,6 +122,8 @@ export default function App() {
 
   // Polling loop for branch HEAD with ETag-based conditional GETs.
   const pollRef = useRef<number | null>(null);
+  const commitsRef = useRef<Commit[]>(commits);
+  commitsRef.current = commits;
   useEffect(() => {
     if (!ref || !branch || demoMode) return;
     let cancelled = false;
@@ -133,6 +135,15 @@ export default function App() {
         if (result) {
           setHeadSha(result.sha);
           setHeadEtag(result.etag);
+          // Branch HEAD advanced past what we have visible — refresh the graph.
+          if (result.sha !== commitsRef.current[0]?.sha) {
+            try {
+              const fresh = await listCommits(ref, branch, pat);
+              if (!cancelled) setCommits(fresh);
+            } catch (e) {
+              console.warn('gitclip: refresh of commit list failed', e);
+            }
+          }
         }
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
@@ -144,7 +155,7 @@ export default function App() {
       cancelled = true;
       if (pollRef.current !== null) window.clearInterval(pollRef.current);
     };
-  }, [ref, branch, pat, headEtag]);
+  }, [ref, branch, pat, headEtag, demoMode]);
 
   const generate = useCallback(async () => {
     if (!ref || !anchorSha || !headSha || anchorSha === headSha) return;

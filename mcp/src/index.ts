@@ -1,10 +1,28 @@
 #!/usr/bin/env node
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { z } from 'zod';
 
 const DEFAULT_URL = 'https://gitclip-vetle.netlify.app';
 const SESSION_RE = /^[a-zA-Z0-9_-]{16,64}$/;
+
+function defaultSessionPath(): string {
+  if (process.env.GITCLIP_SESSION_FILE) return process.env.GITCLIP_SESSION_FILE;
+  const xdg = process.env.XDG_CONFIG_HOME;
+  const base = xdg && xdg.length > 0 ? xdg : join(homedir(), '.config');
+  return join(base, 'gitclip', 'session');
+}
+
+function readSessionFromFile(): string | null {
+  try {
+    return readFileSync(defaultSessionPath(), 'utf8').trim() || null;
+  } catch {
+    return null;
+  }
+}
 
 interface BufferResponse {
   entries: { at: number; text: string }[];
@@ -14,10 +32,17 @@ interface BufferResponse {
 }
 
 function getSession(): string {
-  const s = process.env.GITCLIP_SESSION;
-  if (!s) throw new Error('GITCLIP_SESSION env var is required (the session id from the GitClip site).');
-  if (!SESSION_RE.test(s))
-    throw new Error('GITCLIP_SESSION must be 16-64 chars matching [A-Za-z0-9_-].');
+  const s = process.env.GITCLIP_SESSION ?? readSessionFromFile();
+  if (!s) {
+    throw new Error(
+      `gitclip-mcp: no session configured. Write your session id to ${defaultSessionPath()} ` +
+        `(e.g. \`mkdir -p ~/.config/gitclip && echo <session-id> > ~/.config/gitclip/session\`), ` +
+        `or set the GITCLIP_SESSION env var.`,
+    );
+  }
+  if (!SESSION_RE.test(s)) {
+    throw new Error('gitclip-mcp: session id must be 16-64 chars matching [A-Za-z0-9_-].');
+  }
   return s;
 }
 

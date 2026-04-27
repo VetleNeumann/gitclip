@@ -39,7 +39,10 @@ export function LogBuffer({ sessionId, onRotate }: Props) {
     }
   };
 
-  const mcpCommand = `claude mcp add gitclip --env GITCLIP_SESSION=${sessionId} --env GITCLIP_URL=${typeof location === 'undefined' ? '' : location.origin} -- npx -y gitclip-mcp`;
+  const origin = typeof location === 'undefined' ? '' : location.origin;
+  const bashWriteSession = `mkdir -p ~/.config/gitclip && printf '%s' '${sessionId}' > ~/.config/gitclip/session`;
+  const pwshWriteSession = `$d="$HOME/.config/gitclip"; New-Item -ItemType Directory -Force -Path $d | Out-Null; Set-Content -LiteralPath "$d/session" -Value '${sessionId}' -NoNewline -Encoding utf8`;
+  const claudeAddCommand = `claude mcp add gitclip --env GITCLIP_URL=${origin} -- npx -y gitclip-mcp`;
 
   return (
     <section className="space-y-3">
@@ -78,16 +81,38 @@ export function LogBuffer({ sessionId, onRotate }: Props) {
         {status && <span className="text-xs text-zinc-400">{status}</span>}
       </div>
 
-      <details className="text-sm text-zinc-400">
-        <summary className="cursor-pointer hover:text-zinc-200">First-time setup: wire this into Claude Code</summary>
-        <p className="mt-2">Run this once on your dev laptop:</p>
+      <details className="text-sm text-zinc-400 space-y-2">
+        <summary className="cursor-pointer hover:text-zinc-200">Setup: wire this into Claude Code</summary>
+
+        <p className="mt-3">
+          <span className="text-zinc-300 font-medium">Step 1.</span> Save the session id into a
+          file the MCP looks for. Run this on your dev laptop whenever you rotate the session:
+        </p>
+        <div className="space-y-1.5">
+          <div className="text-xs text-zinc-500">bash / WSL / macOS:</div>
+          <pre className="bg-zinc-900 border border-zinc-800 rounded p-2 text-xs font-mono overflow-auto whitespace-pre-wrap break-all">
+{bashWriteSession}
+          </pre>
+          <div className="text-xs text-zinc-500">PowerShell (Windows):</div>
+          <pre className="bg-zinc-900 border border-zinc-800 rounded p-2 text-xs font-mono overflow-auto whitespace-pre-wrap break-all">
+{pwshWriteSession}
+          </pre>
+        </div>
+
+        <p className="mt-3">
+          <span className="text-zinc-300 font-medium">Step 2.</span> One-time only — register the
+          MCP with Claude Code (after you've published <code className="font-mono">gitclip-mcp</code> to npm,
+          or substitute the local path: <code className="font-mono">node /path/to/gitclip/mcp/dist/index.js</code>):
+        </p>
         <pre className="bg-zinc-900 border border-zinc-800 rounded p-2 text-xs font-mono overflow-auto whitespace-pre-wrap break-all">
-{mcpCommand}
+{claudeAddCommand}
         </pre>
-        <p className="mt-2">
-          Then in any Claude Code session: <em>"read the buffer"</em> — Claude calls the
-          <code className="font-mono"> read_buffer</code> tool, your pasted logs land in its
-          context, and the buffer is cleared.
+
+        <p className="mt-3 text-xs">
+          Then in any Claude Code session: <em>"read the buffer"</em> — the
+          <code className="font-mono"> read_buffer</code> tool fires, the entries land in
+          context, the buffer clears. Rotate freely; only step 1 needs to be re-run, and
+          Claude Code picks up the new session on the next tool call.
         </p>
       </details>
     </section>

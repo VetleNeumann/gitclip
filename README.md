@@ -63,20 +63,30 @@ npx netlify deploy --build --prod \
 
 ## Wiring `gitclip-mcp` into Claude Code
 
-After loading the site, copy the session ID it shows, then on your dev laptop:
+The MCP looks up its session id from `~/.config/gitclip/session` (or `$XDG_CONFIG_HOME/gitclip/session`, or `$GITCLIP_SESSION_FILE`, or the `GITCLIP_SESSION` env var — first match wins). That separation means you only register the MCP with Claude Code **once**, and rotating the session is a one-line file write — no Claude Code restart, no `mcp remove && add` dance.
+
+**One-time setup on your dev laptop:**
 
 ```bash
-# Local-build version (since gitclip-mcp isn't on npm yet):
-claude mcp add gitclip \
-  --env GITCLIP_SESSION=<paste-session-id> \
-  --env GITCLIP_URL=https://gitclip-vetle.netlify.app \
-  -- node /absolute/path/to/gitclip/mcp/dist/index.js
+# Local build (until gitclip-mcp is published to npm):
+claude mcp add gitclip -- node /absolute/path/to/gitclip/mcp/dist/index.js
 
-# Once published to npm:
-# claude mcp add gitclip --env GITCLIP_SESSION=<id> -- npx -y gitclip-mcp
+# Once on npm:
+# claude mcp add gitclip -- npx -y gitclip-mcp
 ```
 
-In any Claude Code session: *"read the buffer"* → `read_buffer` tool fires → entries land in context → buffer clears.
+**Per-session (write the session id once, or whenever you rotate it via the UI):**
+
+```bash
+# bash / WSL / macOS:
+mkdir -p ~/.config/gitclip && printf '%s' '<session-id>' > ~/.config/gitclip/session
+
+# PowerShell:
+$d="$HOME/.config/gitclip"; New-Item -ItemType Directory -Force -Path $d | Out-Null; \
+  Set-Content -LiteralPath "$d/session" -Value '<session-id>' -NoNewline -Encoding utf8
+```
+
+The web UI shows both copy-pasteable forms with your current session pre-filled. In any Claude Code session: *"read the buffer"* → `read_buffer` tool fires → entries land in context → buffer clears.
 
 ## Security notes
 
