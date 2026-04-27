@@ -20,6 +20,8 @@ For real use: paste any GitHub repo URL (public or private — private needs a P
 
 ## Architecture
 
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full design rationale (constraints, data flows, key tradeoffs). Quick layer overview:
+
 | Layer | What it does |
 |---|---|
 | `web/` | Vite + React + TS SPA. Calls `api.github.com` directly (PAT in browser only, never traverses our backend), polls branch HEAD with ETag conditional GETs, renders an SVG commit graph, generates the apply script in-page. |
