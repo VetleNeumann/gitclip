@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck web
+        run: npx tsc -p web --noEmit
+
+      - name: Typecheck Netlify Functions
+        run: npx tsc -p netlify/functions --noEmit
+
+      - name: Build MCP server
+        run: npm --workspace mcp run build
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build web
+        run: npm run build

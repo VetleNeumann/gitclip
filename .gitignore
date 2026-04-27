@@ -1,0 +1,13 @@
+node_modules
+dist
+.netlify
+.env
+.env.*
+!.env.example
+.DS_Store
+*.log
+coverage
+.playwright-mcp/
+graph-*.png
+prod-graph.png
+*.tsbuildinfo
