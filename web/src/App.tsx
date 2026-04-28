@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { RepoForm } from './components/RepoForm';
 import { CommitGraph } from './components/CommitGraph';
 import { SyncOutput } from './components/SyncOutput';
 import { LogBuffer } from './components/LogBuffer';
+import { TabBar } from './components/TabBar';
 import {
   compareCommits,
   getBranchHead,
@@ -11,17 +12,54 @@ import {
   getRepoMeta,
   listBranches,
   listCommits,
-  type Branch,
+  parseRepoUrl,
   type Commit,
   type RepoRef,
 } from './lib/github';
-import { generateScripts, type FileOp, type GeneratedScripts } from './lib/scriptGen';
+import { generateScripts, type FileOp } from './lib/scriptGen';
 import { getOrCreateSessionId, rotateSessionId } from './lib/session';
+import {
+  makeSkeletonTab,
+  newTabId,
+  repoUrl,
+  tabsReducer,
+  type Tab,
+  type TabAction,
+  type TabsState,
+} from './lib/tabs';
 
 const POLL_MS = 30_000;
+const TABS_KEY = 'gitclip.tabs';
+const ACTIVE_TAB_KEY = 'gitclip.activeTab';
+const PAT_KEY = 'gitclip.pat';
+
+interface PersistedTab {
+  url: string;
+  branch?: string;
+  anchorSha?: string | null;
+}
 
 function lastSeenKey(ref: RepoRef): string {
   return `gitclip.lastSeen.default.${ref.owner}/${ref.repo}`;
+}
+
+function readPersistedTabs(): PersistedTab[] {
+  const raw = localStorage.getItem(TABS_KEY);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed as PersistedTab[];
+    } catch {
+      // fall through to legacy migration
+    }
+  }
+  // Legacy single-repo migration.
+  const lastUrl = localStorage.getItem('gitclip.lastUrl');
+  if (lastUrl) {
+    const anchorSha = localStorage.getItem('gitclip.anchorSha');
+    return [{ url: lastUrl, anchorSha }];
+  }
+  return [];
 }
 
 const DEMO_COMMITS: Commit[] = [
@@ -42,88 +80,279 @@ const DEMO_COMMITS: Commit[] = [
   { sha: 'mmmmm1', message: 'init', authorName: 'oscar', authorEmail: '', date: '2026-04-27T02:00:00Z', parents: [] },
 ];
 
-export default function App() {
-  const [sessionId, setSessionId] = useState<string>(() => getOrCreateSessionId());
-  const [ref, setRef] = useState<RepoRef | null>(null);
-  const [pat, setPat] = useState<string | null>(() => localStorage.getItem('gitclip.pat'));
-  const [branches, setBranches] = useState<Branch[]>([]);
-  const [branch, setBranch] = useState<string>('');
-  const [commits, setCommits] = useState<Commit[]>([]);
-  const [anchorSha, setAnchorSha] = useState<string | null>(() => localStorage.getItem('gitclip.anchorSha'));
-  const [headSha, setHeadSha] = useState<string | null>(null);
-  const headEtagRef = useRef<string | null>(null);
-  const [defaultBranchName, setDefaultBranchName] = useState<string | null>(null);
-  const [defaultHeadSha, setDefaultHeadSha] = useState<string | null>(null);
-  const defaultHeadEtagRef = useRef<string | null>(null);
-  const [defaultLastSeenSha, setDefaultLastSeenSha] = useState<string | null>(null);
-  const [scripts, setScripts] = useState<GeneratedScripts | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [genStatus, setGenStatus] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [lastPoll, setLastPoll] = useState<number | null>(null);
+function buildDemoState(): TabsState {
+  const id = newTabId();
+  const tab: Tab = {
+    id,
+    ref: { owner: 'demo', repo: 'graph' },
+    branches: [{ name: 'main', sha: DEMO_COMMITS[0]!.sha, isDefault: true }],
+    branch: 'main',
+    commits: DEMO_COMMITS,
+    anchorSha: DEMO_COMMITS[5]!.sha,
+    headSha: DEMO_COMMITS[0]!.sha,
+    defaultBranchName: 'main',
+    defaultHeadSha: DEMO_COMMITS[0]!.sha,
+    defaultLastSeenSha: DEMO_COMMITS[0]!.sha,
+    scripts: null,
+    busy: false,
+    genStatus: null,
+    error: null,
+    lastPoll: null,
+  };
+  return { tabs: [tab], activeTabId: id };
+}
 
-  const initialUrl = useMemo(() => localStorage.getItem('gitclip.lastUrl') ?? '', []);
-  const initialPat = useMemo(() => localStorage.getItem('gitclip.pat') ?? '', []);
-  const demoMode = useMemo(() => new URLSearchParams(location.search).has('demo'), []);
+function TabPoller({
+  tab,
+  pat,
+  dispatch,
+  demoMode,
+}: {
+  tab: Tab;
+  pat: string | null;
+  dispatch: React.Dispatch<TabAction>;
+  demoMode: boolean;
+}) {
+  const headEtagRef = useRef<string | null>(null);
+  const defaultHeadEtagRef = useRef<string | null>(null);
+  const commitsRef = useRef(tab.commits);
+  commitsRef.current = tab.commits;
 
   useEffect(() => {
-    if (!demoMode || ref) return;
-    setRef({ owner: 'demo', repo: 'graph' });
-    setBranch('main');
-    setCommits(DEMO_COMMITS);
-    setAnchorSha(DEMO_COMMITS[5]!.sha);
-    setHeadSha(DEMO_COMMITS[0]!.sha);
-  }, [demoMode, ref]);
-
-  const loadRepo = useCallback(async (newRef: RepoRef, newPat: string | null) => {
-    setBusy(true);
-    setError(null);
-    setScripts(null);
-    setHeadSha(null);
-    headEtagRef.current = null;
-    setDefaultHeadSha(null);
-    defaultHeadEtagRef.current = null;
-    try {
-      const meta = await getRepoMeta(newRef, newPat);
-      const [b, c] = await Promise.all([
-        listBranches(newRef, newPat),
-        listCommits(newRef, meta.defaultBranch, newPat),
-      ]);
-      setRef(newRef);
-      setPat(newPat);
-      setBranches(b);
-      setBranch(meta.defaultBranch);
-      setCommits(c);
-      setDefaultBranchName(meta.defaultBranch);
-      const seedHead = c[0]?.sha ?? null;
-      setDefaultHeadSha(seedHead);
-      const storedSeen = localStorage.getItem(lastSeenKey(newRef));
-      setDefaultLastSeenSha(storedSeen ?? seedHead);
-      const persistedAnchor = localStorage.getItem('gitclip.anchorSha');
-      if (!persistedAnchor && c.length > 0) {
-        setAnchorSha(c[0]!.sha);
-        localStorage.setItem('gitclip.anchorSha', c[0]!.sha);
+    if (demoMode || !tab.ref || !tab.branch) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const result = await getBranchHead(tab.ref, tab.branch, pat, headEtagRef.current);
+        if (cancelled) return;
+        const lastPoll = Date.now();
+        if (!result) {
+          dispatch({ type: 'UPDATE_TAB', id: tab.id, patch: { lastPoll } });
+          return;
+        }
+        headEtagRef.current = result.etag;
+        dispatch({ type: 'UPDATE_TAB', id: tab.id, patch: { headSha: result.sha, lastPoll } });
+        if (result.sha !== commitsRef.current[0]?.sha) {
+          try {
+            const fresh = await listCommits(tab.ref, tab.branch, pat);
+            if (!cancelled) dispatch({ type: 'UPDATE_TAB', id: tab.id, patch: { commits: fresh } });
+          } catch (e) {
+            console.warn('gitclip: refresh of commit list failed', e);
+          }
+        }
+      } catch (e) {
+        if (!cancelled) {
+          dispatch({
+            type: 'UPDATE_TAB',
+            id: tab.id,
+            patch: { error: e instanceof Error ? e.message : String(e) },
+          });
+        }
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }, []);
+    };
+    void tick();
+    const id = window.setInterval(tick, POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+      headEtagRef.current = null;
+    };
+  }, [tab.id, tab.ref, tab.branch, pat, demoMode, dispatch]);
 
-  const setAnchor = useCallback((sha: string) => {
-    setAnchorSha(sha);
-    localStorage.setItem('gitclip.anchorSha', sha);
-    setScripts(null);
-  }, []);
+  useEffect(() => {
+    if (demoMode || !tab.defaultBranchName || tab.defaultBranchName === tab.branch) return;
+    const defaultBranch = tab.defaultBranchName;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const result = await getBranchHead(tab.ref, defaultBranch, pat, defaultHeadEtagRef.current);
+        if (cancelled || !result) return;
+        defaultHeadEtagRef.current = result.etag;
+        dispatch({ type: 'UPDATE_TAB', id: tab.id, patch: { defaultHeadSha: result.sha } });
+      } catch (e) {
+        console.warn('gitclip: default-branch poll failed', e);
+      }
+    };
+    void tick();
+    const id = window.setInterval(tick, POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+      defaultHeadEtagRef.current = null;
+    };
+  }, [tab.id, tab.ref, tab.defaultBranchName, tab.branch, pat, demoMode, dispatch]);
+
+  return null;
+}
+
+export default function App() {
+  const [sessionId, setSessionId] = useState<string>(() => getOrCreateSessionId());
+  const [pat, setPat] = useState<string | null>(() => localStorage.getItem(PAT_KEY));
+  const demoMode = useMemo(() => new URLSearchParams(location.search).has('demo'), []);
+  const [{ tabs, activeTabId }, dispatch] = useReducer(
+    tabsReducer,
+    null,
+    () => (demoMode ? buildDemoState() : { tabs: [], activeTabId: null }),
+  );
+  const [inputExpanded, setInputExpanded] = useState(true);
+  const [hydrated, setHydrated] = useState(demoMode);
+
+  const initialPat = useMemo(() => localStorage.getItem(PAT_KEY) ?? '', []);
+  const activeTab = useMemo(
+    () => tabs.find((t) => t.id === activeTabId) ?? null,
+    [tabs, activeTabId],
+  );
+
+  // Auto-collapse input once we have at least one tab; auto-expand when last closes.
+  useEffect(() => {
+    if (tabs.length === 0) setInputExpanded(true);
+    else setInputExpanded(false);
+  }, [tabs.length]);
+
+  const loadIntoTab = useCallback(
+    async (
+      tabId: string,
+      ref: RepoRef,
+      tabPat: string | null,
+      opts: { branch?: string; anchorSha?: string | null } = {},
+    ) => {
+      dispatch({ type: 'UPDATE_TAB', id: tabId, patch: { busy: true, error: null } });
+      try {
+        const meta = await getRepoMeta(ref, tabPat);
+        const targetBranch = opts.branch || meta.defaultBranch;
+        const [b, c] = await Promise.all([
+          listBranches(ref, tabPat),
+          listCommits(ref, targetBranch, tabPat),
+        ]);
+        const seedHead = c[0]?.sha ?? null;
+        const seedAnchor = opts.anchorSha ?? seedHead;
+        const storedSeen = localStorage.getItem(lastSeenKey(ref));
+        dispatch({
+          type: 'UPDATE_TAB',
+          id: tabId,
+          patch: {
+            ref,
+            branches: b,
+            branch: targetBranch,
+            commits: c,
+            anchorSha: seedAnchor,
+            headSha: seedHead,
+            defaultBranchName: meta.defaultBranch,
+            defaultHeadSha: targetBranch === meta.defaultBranch ? seedHead : null,
+            defaultLastSeenSha:
+              storedSeen ?? (targetBranch === meta.defaultBranch ? seedHead : null),
+            busy: false,
+          },
+        });
+      } catch (e) {
+        dispatch({
+          type: 'UPDATE_TAB',
+          id: tabId,
+          patch: { busy: false, error: e instanceof Error ? e.message : String(e) },
+        });
+      }
+    },
+    [],
+  );
+
+  const addTab = useCallback(
+    (ref: RepoRef, newPat: string | null) => {
+      if (newPat !== pat) {
+        setPat(newPat);
+        if (newPat) localStorage.setItem(PAT_KEY, newPat);
+        else localStorage.removeItem(PAT_KEY);
+      }
+      const existing = tabs.find((t) => t.ref.owner === ref.owner && t.ref.repo === ref.repo);
+      if (existing) {
+        dispatch({ type: 'SET_ACTIVE', id: existing.id });
+        return;
+      }
+      const id = newTabId();
+      const skeleton = makeSkeletonTab(id, ref);
+      dispatch({ type: 'ADD_TAB', tab: skeleton });
+      void loadIntoTab(id, ref, newPat);
+    },
+    [pat, tabs, loadIntoTab],
+  );
+
+  // One-time hydration from localStorage.
+  const hydrationStartedRef = useRef(false);
+  useEffect(() => {
+    if (hydrated || demoMode || hydrationStartedRef.current) return;
+    hydrationStartedRef.current = true;
+    const persisted = readPersistedTabs();
+    if (persisted.length === 0) {
+      setHydrated(true);
+      return;
+    }
+    const skeletons: { tab: Tab; persisted: PersistedTab }[] = [];
+    for (const p of persisted) {
+      const ref = parseRepoUrl(p.url);
+      if (!ref) continue;
+      const id = newTabId();
+      skeletons.push({
+        tab: makeSkeletonTab(id, ref, { branch: p.branch, anchorSha: p.anchorSha }),
+        persisted: p,
+      });
+    }
+    if (skeletons.length === 0) {
+      setHydrated(true);
+      return;
+    }
+    const activeKey = localStorage.getItem(ACTIVE_TAB_KEY);
+    const activeId =
+      skeletons.find(({ tab }) => repoUrl(tab.ref) === activeKey)?.tab.id ??
+      skeletons[0]!.tab.id;
+    dispatch({
+      type: 'RESTORE',
+      tabs: skeletons.map((s) => s.tab),
+      activeTabId: activeId,
+    });
+    setHydrated(true);
+    for (const { tab, persisted: p } of skeletons) {
+      void loadIntoTab(tab.id, tab.ref, pat, { branch: p.branch, anchorSha: p.anchorSha });
+    }
+  }, [hydrated, demoMode, loadIntoTab, pat]);
+
+  // Persist tabs and active id on change.
+  useEffect(() => {
+    if (!hydrated || demoMode) return;
+    const data: PersistedTab[] = tabs.map((t) => ({
+      url: repoUrl(t.ref),
+      branch: t.branch,
+      anchorSha: t.anchorSha,
+    }));
+    localStorage.setItem(TABS_KEY, JSON.stringify(data));
+    if (activeTab) {
+      localStorage.setItem(ACTIVE_TAB_KEY, repoUrl(activeTab.ref));
+    } else {
+      localStorage.removeItem(ACTIVE_TAB_KEY);
+    }
+  }, [tabs, activeTab, hydrated, demoMode]);
+
+  const setAnchor = useCallback(
+    (sha: string) => {
+      if (!activeTab) return;
+      dispatch({
+        type: 'UPDATE_TAB',
+        id: activeTab.id,
+        patch: { anchorSha: sha, scripts: null },
+      });
+    },
+    [activeTab],
+  );
 
   const jumpToBranch = useCallback(
     async (target: string) => {
-      if (!ref || target === branch) return;
-      const previousHead = headSha ?? commits[0]?.sha;
-      setBusy(true);
-      setError(null);
-      setGenStatus(`Jumping to ${target}…`);
+      if (!activeTab || target === activeTab.branch) return;
+      const tabId = activeTab.id;
+      const { ref, defaultBranchName } = activeTab;
+      const previousHead = activeTab.headSha ?? activeTab.commits[0]?.sha;
+      dispatch({
+        type: 'UPDATE_TAB',
+        id: tabId,
+        patch: { busy: true, error: null, genStatus: `Jumping to ${target}…` },
+      });
       try {
         const headResult = await getBranchHead(ref, target, pat, null);
         const targetHead = headResult?.sha;
@@ -133,122 +362,85 @@ export default function App() {
           mergeBase = await getMergeBase(ref, previousHead, targetHead, pat);
         }
         const fresh = await listCommits(ref, target, pat);
-        setBranch(target);
-        setCommits(fresh);
-        setHeadSha(targetHead);
-        headEtagRef.current = headResult.etag;
-        setAnchor(mergeBase);
+        const status =
+          mergeBase === targetHead
+            ? `Already at ${target} HEAD — nothing to apply.`
+            : mergeBase === previousHead
+              ? `${target} is strictly ahead of your previous position.`
+              : `Anchored at merge-base ${mergeBase.slice(0, 7)}.`;
+        const patch: Partial<Tab> = {
+          branch: target,
+          commits: fresh,
+          headSha: targetHead,
+          anchorSha: mergeBase,
+          scripts: null,
+          busy: false,
+          genStatus: status,
+        };
         if (target === defaultBranchName) {
-          setDefaultLastSeenSha(targetHead);
+          patch.defaultLastSeenSha = targetHead;
           localStorage.setItem(lastSeenKey(ref), targetHead);
         }
-        if (mergeBase === targetHead) {
-          setGenStatus(`Already at ${target} HEAD — nothing to apply.`);
-        } else if (mergeBase === previousHead) {
-          setGenStatus(`${target} is strictly ahead of your previous position.`);
-        } else {
-          setGenStatus(`Anchored at merge-base ${mergeBase.slice(0, 7)}.`);
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-        setGenStatus(null);
-      } finally {
-        setBusy(false);
+        dispatch({ type: 'UPDATE_TAB', id: tabId, patch });
+      } catch (e) {
+        dispatch({
+          type: 'UPDATE_TAB',
+          id: tabId,
+          patch: { busy: false, error: e instanceof Error ? e.message : String(e), genStatus: null },
+        });
       }
     },
-    [ref, branch, pat, headSha, commits, defaultBranchName, setAnchor],
+    [activeTab, pat],
   );
 
   const refreshBranches = useCallback(async () => {
-    if (!ref) return;
+    if (!activeTab) return;
     try {
-      const b = await listBranches(ref, pat);
-      setBranches(b);
+      const b = await listBranches(activeTab.ref, pat);
+      dispatch({ type: 'UPDATE_TAB', id: activeTab.id, patch: { branches: b } });
     } catch (e) {
       console.warn('gitclip: branch list refresh failed', e);
     }
-  }, [ref, pat]);
-
-  // Polling loop for branch HEAD with ETag-based conditional GETs.
-  const pollRef = useRef<number | null>(null);
-  const commitsRef = useRef<Commit[]>(commits);
-  commitsRef.current = commits;
-  useEffect(() => {
-    if (!ref || !branch || demoMode) return;
-    let cancelled = false;
-    const tick = async () => {
-      try {
-        const result = await getBranchHead(ref, branch, pat, headEtagRef.current);
-        if (cancelled) return;
-        setLastPoll(Date.now());
-        if (result) {
-          setHeadSha(result.sha);
-          headEtagRef.current = result.etag;
-          // Branch HEAD advanced past what we have visible — refresh the graph.
-          if (result.sha !== commitsRef.current[0]?.sha) {
-            try {
-              const fresh = await listCommits(ref, branch, pat);
-              if (!cancelled) setCommits(fresh);
-            } catch (e) {
-              console.warn('gitclip: refresh of commit list failed', e);
-            }
-          }
-        }
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
-      }
-    };
-    void tick();
-    pollRef.current = window.setInterval(tick, POLL_MS);
-    return () => {
-      cancelled = true;
-      if (pollRef.current !== null) window.clearInterval(pollRef.current);
-    };
-  }, [ref, branch, pat, demoMode]);
-
-  // Secondary poll for the default branch when it differs from the active one.
-  const defaultPollRef = useRef<number | null>(null);
-  useEffect(() => {
-    if (!ref || !defaultBranchName || demoMode) return;
-    if (defaultBranchName === branch) return;
-    let cancelled = false;
-    const tick = async () => {
-      try {
-        const result = await getBranchHead(ref, defaultBranchName, pat, defaultHeadEtagRef.current);
-        if (cancelled || !result) return;
-        defaultHeadEtagRef.current = result.etag;
-        setDefaultHeadSha(result.sha);
-      } catch (e) {
-        console.warn('gitclip: default-branch poll failed', e);
-      }
-    };
-    void tick();
-    defaultPollRef.current = window.setInterval(tick, POLL_MS);
-    return () => {
-      cancelled = true;
-      if (defaultPollRef.current !== null) window.clearInterval(defaultPollRef.current);
-    };
-  }, [ref, defaultBranchName, branch, pat, demoMode]);
+  }, [activeTab, pat]);
 
   const generate = useCallback(async () => {
-    if (!ref || !anchorSha || !headSha || anchorSha === headSha) return;
-    setBusy(true);
-    setError(null);
-    setGenStatus('Comparing commits…');
+    if (
+      !activeTab ||
+      !activeTab.anchorSha ||
+      !activeTab.headSha ||
+      activeTab.anchorSha === activeTab.headSha
+    )
+      return;
+    const tabId = activeTab.id;
+    const { ref, anchorSha, headSha } = activeTab;
+    dispatch({
+      type: 'UPDATE_TAB',
+      id: tabId,
+      patch: { busy: true, error: null, genStatus: 'Comparing commits…' },
+    });
     try {
       const cmp = await compareCommits(ref, anchorSha, headSha, pat);
       if (cmp.truncated) {
-        setError(
-          `GitHub compare API truncated at 300 files (this commit range changed ≥300 files). Pick a closer anchor or sync in steps.`,
-        );
-        setBusy(false);
+        dispatch({
+          type: 'UPDATE_TAB',
+          id: tabId,
+          patch: {
+            busy: false,
+            error: `GitHub compare API truncated at 300 files (this commit range changed ≥300 files). Pick a closer anchor or sync in steps.`,
+            genStatus: null,
+          },
+        });
         return;
       }
       const ops: FileOp[] = [];
       let i = 0;
       for (const f of cmp.files) {
         i++;
-        setGenStatus(`Fetching file ${i}/${cmp.files.length}: ${f.filename}`);
+        dispatch({
+          type: 'UPDATE_TAB',
+          id: tabId,
+          patch: { genStatus: `Fetching file ${i}/${cmp.files.length}: ${f.filename}` },
+        });
         if (f.status === 'removed') {
           ops.push({ kind: 'remove', path: f.filename });
         } else if (f.status === 'renamed' && f.previous_filename) {
@@ -262,37 +454,57 @@ export default function App() {
           ops.push({ kind: 'write', path: f.filename, content });
         }
       }
-      setGenStatus('Rendering scripts…');
+      dispatch({ type: 'UPDATE_TAB', id: tabId, patch: { genStatus: 'Rendering scripts…' } });
       const generated = generateScripts({ ops, targetSha: headSha });
-      setScripts(generated);
-      setGenStatus(
-        `Ready: ${ops.length} file ops, ${(generated.bash.length / 1024).toFixed(1)} KB bash / ${(generated.powershell.length / 1024).toFixed(1)} KB pwsh`,
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setGenStatus(null);
-    } finally {
-      setBusy(false);
+      dispatch({
+        type: 'UPDATE_TAB',
+        id: tabId,
+        patch: {
+          scripts: generated,
+          busy: false,
+          genStatus: `Ready: ${ops.length} file ops, ${(generated.bash.length / 1024).toFixed(1)} KB bash / ${(generated.powershell.length / 1024).toFixed(1)} KB pwsh`,
+        },
+      });
+    } catch (e) {
+      dispatch({
+        type: 'UPDATE_TAB',
+        id: tabId,
+        patch: {
+          busy: false,
+          error: e instanceof Error ? e.message : String(e),
+          genStatus: null,
+        },
+      });
     }
-  }, [ref, anchorSha, headSha, pat]);
+  }, [activeTab, pat]);
 
   const markApplied = useCallback(() => {
-    if (headSha) {
-      setAnchor(headSha);
-      setScripts(null);
-      setGenStatus(null);
-    }
-  }, [headSha, setAnchor]);
+    if (!activeTab || !activeTab.headSha) return;
+    dispatch({
+      type: 'UPDATE_TAB',
+      id: activeTab.id,
+      patch: { anchorSha: activeTab.headSha, scripts: null, genStatus: null },
+    });
+  }, [activeTab]);
 
-  const newCommitsAvailable = headSha && anchorSha && headSha !== anchorSha;
+  const closeTab = useCallback((id: string) => {
+    dispatch({ type: 'CLOSE_TAB', id });
+  }, []);
+
+  const newCommitsAvailable =
+    activeTab && activeTab.headSha && activeTab.anchorSha && activeTab.headSha !== activeTab.anchorSha;
   const defaultBranchAhead =
-    !!defaultBranchName &&
-    branch !== defaultBranchName &&
-    !!defaultHeadSha &&
-    defaultHeadSha !== defaultLastSeenSha;
+    !!activeTab &&
+    !!activeTab.defaultBranchName &&
+    activeTab.branch !== activeTab.defaultBranchName &&
+    !!activeTab.defaultHeadSha &&
+    activeTab.defaultHeadSha !== activeTab.defaultLastSeenSha;
 
   return (
     <div className="min-h-screen px-4 py-6 max-w-7xl mx-auto space-y-5">
+      {tabs.map((tab) => (
+        <TabPoller key={tab.id} tab={tab} pat={pat} dispatch={dispatch} demoMode={demoMode} />
+      ))}
       <header className="flex items-baseline justify-between gap-4 flex-wrap">
         <h1 className="text-2xl font-bold">
           GitClip <span className="text-zinc-500 text-base font-normal">— browser-only commit sync</span>
@@ -303,26 +515,47 @@ export default function App() {
       </header>
 
       <section className="rounded border border-zinc-800 p-4 space-y-3">
-        <RepoForm initialUrl={initialUrl} initialPat={initialPat} onLoad={loadRepo} busy={busy} />
-        {ref && (
+        <RepoForm
+          initialUrl=""
+          initialPat={initialPat}
+          onLoad={addTab}
+          busy={!!activeTab?.busy}
+          collapsed={!inputExpanded && tabs.length > 0}
+          onExpand={() => setInputExpanded(true)}
+          onCollapse={() => setInputExpanded(false)}
+        />
+      </section>
+
+      {tabs.length > 0 && (
+        <TabBar
+          tabs={tabs}
+          activeTabId={activeTabId}
+          onActivate={(id) => dispatch({ type: 'SET_ACTIVE', id })}
+          onClose={closeTab}
+          onAdd={() => setInputExpanded(true)}
+        />
+      )}
+
+      {activeTab ? (
+        <>
           <div className="text-sm text-zinc-400 flex items-center gap-3 flex-wrap">
             <span>
               <span className="text-zinc-500">repo</span>{' '}
               <span className="font-mono text-zinc-200">
-                {ref.owner}/{ref.repo}
+                {activeTab.ref.owner}/{activeTab.ref.repo}
               </span>
             </span>
-            {branches.length > 0 && (
+            {activeTab.branches.length > 0 && (
               <span>
                 <span className="text-zinc-500">branch</span>{' '}
                 <select
                   className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm"
-                  value={branch}
+                  value={activeTab.branch}
                   onFocus={refreshBranches}
                   onChange={(e) => jumpToBranch(e.target.value)}
-                  disabled={busy}
+                  disabled={activeTab.busy}
                 >
-                  {branches.map((b) => (
+                  {activeTab.branches.map((b) => (
                     <option key={b.name} value={b.name}>
                       {b.name}
                       {b.isDefault ? ' (default)' : ''}
@@ -332,121 +565,156 @@ export default function App() {
               </span>
             )}
             <span className="text-xs text-zinc-500 ml-auto">
-              {lastPoll ? `last polled ${new Date(lastPoll).toLocaleTimeString()}` : 'polling…'}
+              {activeTab.lastPoll
+                ? `last polled ${new Date(activeTab.lastPoll).toLocaleTimeString()}`
+                : 'polling…'}
             </span>
           </div>
-        )}
-        {error && <div className="text-sm text-red-400 break-words">{error}</div>}
-      </section>
-
-      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-5">
-        {/* LEFT: graph + commits */}
-        <section className="rounded border border-zinc-800 overflow-hidden flex flex-col min-h-0">
-          <header className="px-4 py-2 border-b border-zinc-800 flex items-center justify-between text-sm">
-            <span className="font-medium">
-              {ref ? <>commits on <span className="font-mono text-zinc-300">{branch}</span></> : 'Commits'}
-            </span>
-            <span className="text-xs text-zinc-500">
-              {commits.length > 0 && `showing latest ${commits.length}`}
-            </span>
-          </header>
-          <div className="overflow-auto" style={{ maxHeight: 'calc(100vh - 280px)' }}>
-            {commits.length > 0 ? (
-              <CommitGraph commits={commits} anchorSha={anchorSha} headSha={headSha} onSelect={setAnchor} />
-            ) : (
-              <div className="p-8 text-sm text-zinc-500 text-center">
-                {ref ? 'Loading commits…' : 'Load a repo above to see its commit graph.'}
-              </div>
-            )}
-          </div>
-          {commits.length > 0 && (
-            <div className="px-4 py-2 border-t border-zinc-800 text-xs text-zinc-500">
-              Click a commit to mark it as your current local state.
-            </div>
+          {activeTab.error && (
+            <div className="text-sm text-red-400 break-words">{activeTab.error}</div>
           )}
-        </section>
 
-        {/* RIGHT: sync output + log buffer */}
-        <div className="space-y-5 min-w-0">
-          {defaultBranchAhead && (
-            <section className="rounded border border-zinc-700 bg-zinc-900/60 p-4 space-y-2">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <h2 className="text-base font-semibold">
-                    <span className="font-mono text-zinc-200">{defaultBranchName}</span> has new
-                    commits
-                  </h2>
-                  <p className="text-xs text-zinc-400 mt-0.5">
-                    {defaultLastSeenSha && (
-                      <>
-                        <span className="font-mono">{defaultLastSeenSha.slice(0, 7)}</span> →{' '}
-                      </>
-                    )}
-                    <span className="font-mono">{defaultHeadSha!.slice(0, 7)}</span> — jumping anchors
-                    you at the merge-base with your current branch.
-                  </p>
-                </div>
-                <button
-                  onClick={() => jumpToBranch(defaultBranchName!)}
-                  disabled={busy}
-                  className="px-3 py-1.5 rounded bg-zinc-700 hover:bg-zinc-600 disabled:bg-zinc-800 text-sm whitespace-nowrap"
-                >
-                  Jump to {defaultBranchName}
-                </button>
-              </div>
-            </section>
-          )}
-          {newCommitsAvailable ? (
-            <section className="rounded border border-emerald-800 bg-emerald-950/30 p-4 space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <h2 className="text-base font-semibold">
-                    New commit on {branch}: <span className="font-mono">{headSha!.slice(0, 7)}</span>
-                  </h2>
-                  <p className="text-xs text-zinc-400 mt-0.5">
-                    From <span className="font-mono">{anchorSha!.slice(0, 7)}</span> →{' '}
-                    <span className="font-mono">{headSha!.slice(0, 7)}</span>
-                  </p>
-                </div>
-                <button
-                  onClick={generate}
-                  disabled={busy}
-                  className="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-700 text-sm whitespace-nowrap"
-                >
-                  {busy ? 'Working…' : 'Generate apply script'}
-                </button>
-              </div>
-              {genStatus && <div className="text-xs text-zinc-400">{genStatus}</div>}
-              {scripts && <SyncOutput scripts={scripts} onApplied={markApplied} targetSha={headSha!} />}
-            </section>
-          ) : ref && commits.length > 0 ? (
-            <section className="rounded border border-zinc-800 p-4">
-              <h2 className="text-base font-semibold mb-1">Up to date</h2>
-              <p className="text-sm text-zinc-400">
-                {anchorSha ? (
-                  <>
-                    You're at <span className="font-mono text-zinc-300">{anchorSha.slice(0, 7)}</span>, the
-                    branch HEAD. The page polls every 30s — when a new commit lands, an apply script will
-                    appear here.
-                  </>
+          <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-5">
+            <section className="rounded border border-zinc-800 overflow-hidden flex flex-col min-h-0">
+              <header className="px-4 py-2 border-b border-zinc-800 flex items-center justify-between text-sm">
+                <span className="font-medium">
+                  {activeTab.ref ? (
+                    <>
+                      commits on <span className="font-mono text-zinc-300">{activeTab.branch}</span>
+                    </>
+                  ) : (
+                    'Commits'
+                  )}
+                </span>
+                <span className="text-xs text-zinc-500">
+                  {activeTab.commits.length > 0 && `showing latest ${activeTab.commits.length}`}
+                </span>
+              </header>
+              <div className="overflow-auto" style={{ maxHeight: 'calc(100vh - 320px)' }}>
+                {activeTab.commits.length > 0 ? (
+                  <CommitGraph
+                    commits={activeTab.commits}
+                    anchorSha={activeTab.anchorSha}
+                    headSha={activeTab.headSha}
+                    onSelect={setAnchor}
+                  />
                 ) : (
-                  'Pick a commit on the left to set your local state.'
+                  <div className="p-8 text-sm text-zinc-500 text-center">
+                    {activeTab.busy ? 'Loading commits…' : 'No commits yet.'}
+                  </div>
                 )}
-              </p>
+              </div>
+              {activeTab.commits.length > 0 && (
+                <div className="px-4 py-2 border-t border-zinc-800 text-xs text-zinc-500">
+                  Click a commit to mark it as your current local state.
+                </div>
+              )}
             </section>
-          ) : null}
 
-          <section className="rounded border border-zinc-800 p-4">
-            <LogBuffer
-              sessionId={sessionId}
-              onRotate={() => setSessionId(rotateSessionId())}
-            />
-          </section>
-        </div>
-      </div>
+            <div className="space-y-5 min-w-0">
+              {defaultBranchAhead && (
+                <section className="rounded border border-zinc-700 bg-zinc-900/60 p-4 space-y-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <h2 className="text-base font-semibold">
+                        <span className="font-mono text-zinc-200">
+                          {activeTab.defaultBranchName}
+                        </span>{' '}
+                        has new commits
+                      </h2>
+                      <p className="text-xs text-zinc-400 mt-0.5">
+                        {activeTab.defaultLastSeenSha && (
+                          <>
+                            <span className="font-mono">
+                              {activeTab.defaultLastSeenSha.slice(0, 7)}
+                            </span>{' '}
+                            →{' '}
+                          </>
+                        )}
+                        <span className="font-mono">{activeTab.defaultHeadSha!.slice(0, 7)}</span> —
+                        jumping anchors you at the merge-base with your current branch.
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => jumpToBranch(activeTab.defaultBranchName!)}
+                      disabled={activeTab.busy}
+                      className="px-3 py-1.5 rounded bg-zinc-700 hover:bg-zinc-600 disabled:bg-zinc-800 text-sm whitespace-nowrap"
+                    >
+                      Jump to {activeTab.defaultBranchName}
+                    </button>
+                  </div>
+                </section>
+              )}
+              {newCommitsAvailable ? (
+                <section className="rounded border border-emerald-800 bg-emerald-950/30 p-4 space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <h2 className="text-base font-semibold">
+                        New commit on {activeTab.branch}:{' '}
+                        <span className="font-mono">{activeTab.headSha!.slice(0, 7)}</span>
+                      </h2>
+                      <p className="text-xs text-zinc-400 mt-0.5">
+                        From <span className="font-mono">{activeTab.anchorSha!.slice(0, 7)}</span> →{' '}
+                        <span className="font-mono">{activeTab.headSha!.slice(0, 7)}</span>
+                      </p>
+                    </div>
+                    <button
+                      onClick={generate}
+                      disabled={activeTab.busy}
+                      className="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-700 text-sm whitespace-nowrap"
+                    >
+                      {activeTab.busy ? 'Working…' : 'Generate apply script'}
+                    </button>
+                  </div>
+                  {activeTab.genStatus && (
+                    <div className="text-xs text-zinc-400">{activeTab.genStatus}</div>
+                  )}
+                  {activeTab.scripts && (
+                    <SyncOutput
+                      scripts={activeTab.scripts}
+                      onApplied={markApplied}
+                      targetSha={activeTab.headSha!}
+                    />
+                  )}
+                </section>
+              ) : activeTab.commits.length > 0 ? (
+                <section className="rounded border border-zinc-800 p-4">
+                  <h2 className="text-base font-semibold mb-1">Up to date</h2>
+                  <p className="text-sm text-zinc-400">
+                    {activeTab.anchorSha ? (
+                      <>
+                        You're at{' '}
+                        <span className="font-mono text-zinc-300">
+                          {activeTab.anchorSha.slice(0, 7)}
+                        </span>
+                        , the branch HEAD. The page polls every 30s — when a new commit lands, an
+                        apply script will appear here.
+                      </>
+                    ) : (
+                      'Pick a commit on the left to set your local state.'
+                    )}
+                  </p>
+                </section>
+              ) : null}
+
+              <section className="rounded border border-zinc-800 p-4">
+                <LogBuffer
+                  sessionId={sessionId}
+                  onRotate={() => setSessionId(rotateSessionId())}
+                />
+              </section>
+            </div>
+          </div>
+        </>
+      ) : (
+        <section className="rounded border border-zinc-800 p-8 text-sm text-zinc-500 text-center">
+          No repos open — paste a GitHub URL above to add a tab.
+        </section>
+      )}
 
       <footer className="text-xs text-zinc-500 pt-4 border-t border-zinc-900">
-        PATs are stored in <code>localStorage</code> and sent only to <code>api.github.com</code>. Buffer entries auto-expire after 24h.
+        PATs are stored in <code>localStorage</code> and sent only to <code>api.github.com</code>.
+        Buffer entries auto-expire after 24h.
       </footer>
     </div>
   );
