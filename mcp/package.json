@@ -3,11 +3,30 @@
   "version": "0.1.0",
   "description": "MCP server that drains a GitClip log buffer into Claude Code.",
   "type": "module",
+  "license": "MIT",
+  "author": "Vetle Neumann",
+  "homepage": "https://github.com/VetleNeumann/gitclip#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/VetleNeumann/gitclip.git",
+    "directory": "mcp"
+  },
+  "bugs": {
+    "url": "https://github.com/VetleNeumann/gitclip/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "claude-code",
+    "gitclip"
+  ],
   "bin": {
     "gitclip-mcp": "dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
   "scripts": {
     "build": "tsc",

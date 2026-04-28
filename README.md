@@ -70,11 +70,10 @@ The MCP looks up its session id from `~/.config/gitclip/session` (or `$XDG_CONFI
 **One-time setup on your dev laptop:**
 
 ```bash
-# Local build (until gitclip-mcp is published to npm):
-claude mcp add gitclip -- node /absolute/path/to/gitclip/mcp/dist/index.js
+claude mcp add gitclip -- npx -y gitclip-mcp
 
-# Once on npm:
-# claude mcp add gitclip -- npx -y gitclip-mcp
+# Or, from a local build (no npm fetch):
+# claude mcp add gitclip -- node /absolute/path/to/gitclip/mcp/dist/index.js
 ```
 
 **Per-session (write the session id once, or whenever you rotate it via the UI):**
