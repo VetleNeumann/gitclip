@@ -7,6 +7,7 @@ import {
   compareCommits,
   getBranchHead,
   getFileContent,
+  getMergeBase,
   getRepoMeta,
   listBranches,
   listCommits,
@@ -18,6 +19,10 @@ import { generateScripts, type FileOp, type GeneratedScripts } from './lib/scrip
 import { getOrCreateSessionId, rotateSessionId } from './lib/session';
 
 const POLL_MS = 30_000;
+
+function lastSeenKey(ref: RepoRef): string {
+  return `gitclip.lastSeen.default.${ref.owner}/${ref.repo}`;
+}
 
 const DEMO_COMMITS: Commit[] = [
   { sha: 'aaaaaa1', message: 'merge feature-x into main', authorName: 'alice', authorEmail: '', date: '2026-04-27T12:00:00Z', parents: ['bbbbbb1', 'ccccc1'] },
@@ -46,7 +51,11 @@ export default function App() {
   const [commits, setCommits] = useState<Commit[]>([]);
   const [anchorSha, setAnchorSha] = useState<string | null>(() => localStorage.getItem('gitclip.anchorSha'));
   const [headSha, setHeadSha] = useState<string | null>(null);
-  const [headEtag, setHeadEtag] = useState<string | null>(null);
+  const headEtagRef = useRef<string | null>(null);
+  const [defaultBranchName, setDefaultBranchName] = useState<string | null>(null);
+  const [defaultHeadSha, setDefaultHeadSha] = useState<string | null>(null);
+  const defaultHeadEtagRef = useRef<string | null>(null);
+  const [defaultLastSeenSha, setDefaultLastSeenSha] = useState<string | null>(null);
   const [scripts, setScripts] = useState<GeneratedScripts | null>(null);
   const [busy, setBusy] = useState(false);
   const [genStatus, setGenStatus] = useState<string | null>(null);
@@ -71,7 +80,9 @@ export default function App() {
     setError(null);
     setScripts(null);
     setHeadSha(null);
-    setHeadEtag(null);
+    headEtagRef.current = null;
+    setDefaultHeadSha(null);
+    defaultHeadEtagRef.current = null;
     try {
       const meta = await getRepoMeta(newRef, newPat);
       const [b, c] = await Promise.all([
@@ -83,6 +94,11 @@ export default function App() {
       setBranches(b);
       setBranch(meta.defaultBranch);
       setCommits(c);
+      setDefaultBranchName(meta.defaultBranch);
+      const seedHead = c[0]?.sha ?? null;
+      setDefaultHeadSha(seedHead);
+      const storedSeen = localStorage.getItem(lastSeenKey(newRef));
+      setDefaultLastSeenSha(storedSeen ?? seedHead);
       const persistedAnchor = localStorage.getItem('gitclip.anchorSha');
       if (!persistedAnchor && c.length > 0) {
         setAnchorSha(c[0]!.sha);
@@ -95,30 +111,63 @@ export default function App() {
     }
   }, []);
 
-  const switchBranch = useCallback(
-    async (name: string) => {
-      if (!ref) return;
-      setBranch(name);
-      setBusy(true);
-      try {
-        const c = await listCommits(ref, name, pat);
-        setCommits(c);
-        setHeadSha(null);
-        setHeadEtag(null);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-      } finally {
-        setBusy(false);
-      }
-    },
-    [ref, pat],
-  );
-
   const setAnchor = useCallback((sha: string) => {
     setAnchorSha(sha);
     localStorage.setItem('gitclip.anchorSha', sha);
     setScripts(null);
   }, []);
+
+  const jumpToBranch = useCallback(
+    async (target: string) => {
+      if (!ref || target === branch) return;
+      const previousHead = headSha ?? commits[0]?.sha;
+      setBusy(true);
+      setError(null);
+      setGenStatus(`Jumping to ${target}…`);
+      try {
+        const headResult = await getBranchHead(ref, target, pat, null);
+        const targetHead = headResult?.sha;
+        if (!targetHead) throw new Error(`could not resolve HEAD of ${target}`);
+        let mergeBase = targetHead;
+        if (previousHead && previousHead !== targetHead) {
+          mergeBase = await getMergeBase(ref, previousHead, targetHead, pat);
+        }
+        const fresh = await listCommits(ref, target, pat);
+        setBranch(target);
+        setCommits(fresh);
+        setHeadSha(targetHead);
+        headEtagRef.current = headResult.etag;
+        setAnchor(mergeBase);
+        if (target === defaultBranchName) {
+          setDefaultLastSeenSha(targetHead);
+          localStorage.setItem(lastSeenKey(ref), targetHead);
+        }
+        if (mergeBase === targetHead) {
+          setGenStatus(`Already at ${target} HEAD — nothing to apply.`);
+        } else if (mergeBase === previousHead) {
+          setGenStatus(`${target} is strictly ahead of your previous position.`);
+        } else {
+          setGenStatus(`Anchored at merge-base ${mergeBase.slice(0, 7)}.`);
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+        setGenStatus(null);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [ref, branch, pat, headSha, commits, defaultBranchName, setAnchor],
+  );
+
+  const refreshBranches = useCallback(async () => {
+    if (!ref) return;
+    try {
+      const b = await listBranches(ref, pat);
+      setBranches(b);
+    } catch (e) {
+      console.warn('gitclip: branch list refresh failed', e);
+    }
+  }, [ref, pat]);
 
   // Polling loop for branch HEAD with ETag-based conditional GETs.
   const pollRef = useRef<number | null>(null);
@@ -129,12 +178,12 @@ export default function App() {
     let cancelled = false;
     const tick = async () => {
       try {
-        const result = await getBranchHead(ref, branch, pat, headEtag);
+        const result = await getBranchHead(ref, branch, pat, headEtagRef.current);
         if (cancelled) return;
         setLastPoll(Date.now());
         if (result) {
           setHeadSha(result.sha);
-          setHeadEtag(result.etag);
+          headEtagRef.current = result.etag;
           // Branch HEAD advanced past what we have visible — refresh the graph.
           if (result.sha !== commitsRef.current[0]?.sha) {
             try {
@@ -155,7 +204,31 @@ export default function App() {
       cancelled = true;
       if (pollRef.current !== null) window.clearInterval(pollRef.current);
     };
-  }, [ref, branch, pat, headEtag, demoMode]);
+  }, [ref, branch, pat, demoMode]);
+
+  // Secondary poll for the default branch when it differs from the active one.
+  const defaultPollRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!ref || !defaultBranchName || demoMode) return;
+    if (defaultBranchName === branch) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const result = await getBranchHead(ref, defaultBranchName, pat, defaultHeadEtagRef.current);
+        if (cancelled || !result) return;
+        defaultHeadEtagRef.current = result.etag;
+        setDefaultHeadSha(result.sha);
+      } catch (e) {
+        console.warn('gitclip: default-branch poll failed', e);
+      }
+    };
+    void tick();
+    defaultPollRef.current = window.setInterval(tick, POLL_MS);
+    return () => {
+      cancelled = true;
+      if (defaultPollRef.current !== null) window.clearInterval(defaultPollRef.current);
+    };
+  }, [ref, defaultBranchName, branch, pat, demoMode]);
 
   const generate = useCallback(async () => {
     if (!ref || !anchorSha || !headSha || anchorSha === headSha) return;
@@ -212,6 +285,11 @@ export default function App() {
   }, [headSha, setAnchor]);
 
   const newCommitsAvailable = headSha && anchorSha && headSha !== anchorSha;
+  const defaultBranchAhead =
+    !!defaultBranchName &&
+    branch !== defaultBranchName &&
+    !!defaultHeadSha &&
+    defaultHeadSha !== defaultLastSeenSha;
 
   return (
     <div className="min-h-screen px-4 py-6 max-w-7xl mx-auto space-y-5">
@@ -240,7 +318,9 @@ export default function App() {
                 <select
                   className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm"
                   value={branch}
-                  onChange={(e) => switchBranch(e.target.value)}
+                  onFocus={refreshBranches}
+                  onChange={(e) => jumpToBranch(e.target.value)}
+                  disabled={busy}
                 >
                   {branches.map((b) => (
                     <option key={b.name} value={b.name}>
@@ -288,6 +368,34 @@ export default function App() {
 
         {/* RIGHT: sync output + log buffer */}
         <div className="space-y-5 min-w-0">
+          {defaultBranchAhead && (
+            <section className="rounded border border-zinc-700 bg-zinc-900/60 p-4 space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-base font-semibold">
+                    <span className="font-mono text-zinc-200">{defaultBranchName}</span> has new
+                    commits
+                  </h2>
+                  <p className="text-xs text-zinc-400 mt-0.5">
+                    {defaultLastSeenSha && (
+                      <>
+                        <span className="font-mono">{defaultLastSeenSha.slice(0, 7)}</span> →{' '}
+                      </>
+                    )}
+                    <span className="font-mono">{defaultHeadSha!.slice(0, 7)}</span> — jumping anchors
+                    you at the merge-base with your current branch.
+                  </p>
+                </div>
+                <button
+                  onClick={() => jumpToBranch(defaultBranchName!)}
+                  disabled={busy}
+                  className="px-3 py-1.5 rounded bg-zinc-700 hover:bg-zinc-600 disabled:bg-zinc-800 text-sm whitespace-nowrap"
+                >
+                  Jump to {defaultBranchName}
+                </button>
+              </div>
+            </section>
+          )}
           {newCommitsAvailable ? (
             <section className="rounded border border-emerald-800 bg-emerald-950/30 p-4 space-y-3">
               <div className="flex items-center justify-between gap-3">

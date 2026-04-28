@@ -132,6 +132,7 @@ export interface CompareResult {
   files: CompareFile[];
   truncated: boolean;
   totalFiles: number;
+  mergeBaseSha: string;
 }
 
 export async function compareCommits(
@@ -143,12 +144,34 @@ export async function compareCommits(
   const data = await ghFetch<{
     files?: CompareFile[];
     total_commits?: number;
+    merge_base_commit?: { sha: string };
   }>(
     `/repos/${ref.owner}/${ref.repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
     pat,
   );
   const files = data.files ?? [];
-  return { files, truncated: files.length === 300, totalFiles: files.length };
+  return {
+    files,
+    truncated: files.length === 300,
+    totalFiles: files.length,
+    mergeBaseSha: data.merge_base_commit?.sha ?? base,
+  };
+}
+
+export async function getMergeBase(
+  ref: RepoRef,
+  base: string,
+  head: string,
+  pat?: string | null,
+): Promise<string> {
+  const data = await ghFetch<{ merge_base_commit?: { sha: string } }>(
+    `/repos/${ref.owner}/${ref.repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}?per_page=1`,
+    pat,
+  );
+  if (!data.merge_base_commit?.sha) {
+    throw new GitHubError(0, `compare ${base}...${head} returned no merge_base_commit`);
+  }
+  return data.merge_base_commit.sha;
 }
 
 function decodeBase64(s: string): Uint8Array {
