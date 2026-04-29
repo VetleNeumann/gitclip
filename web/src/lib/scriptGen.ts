@@ -10,6 +10,7 @@ export interface GenerateInput {
 export interface GeneratedScripts {
   bash: string;
   powershell: string;
+  targetSha: string;
 }
 
 const BYTES_PER_LINE = 76;
@@ -119,6 +120,7 @@ export function generateScripts(input: GenerateInput): GeneratedScripts {
   return {
     bash: emitBash(input.ops, input.targetSha),
     powershell: emitPowerShell(input.ops, input.targetSha),
+    targetSha: input.targetSha,
   };
 }
 

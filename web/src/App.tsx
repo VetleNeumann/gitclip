@@ -29,6 +29,8 @@ import {
 } from './lib/tabs';
 
 const POLL_MS = 30_000;
+const BURST_POLL_MS = 5_000;
+const BURST_DURATION_MS = 30_000;
 const TABS_KEY = 'gitclip.tabs';
 const ACTIVE_TAB_KEY = 'gitclip.activeTab';
 const PAT_KEY = 'gitclip.pat';
@@ -98,6 +100,7 @@ function buildDemoState(): TabsState {
     genStatus: null,
     error: null,
     lastPoll: null,
+    pollBurstUntil: null,
   };
   return { tabs: [tab], activeTabId: id };
 }
@@ -151,13 +154,23 @@ function TabPoller({
       }
     };
     void tick();
-    const id = window.setInterval(tick, POLL_MS);
+    const burstActive = tab.pollBurstUntil != null && tab.pollBurstUntil > Date.now();
+    const intervalMs = burstActive ? BURST_POLL_MS : POLL_MS;
+    const id = window.setInterval(tick, intervalMs);
+    let clearTimer: number | undefined;
+    if (burstActive) {
+      const remaining = Math.max(0, tab.pollBurstUntil! - Date.now());
+      clearTimer = window.setTimeout(() => {
+        dispatch({ type: 'UPDATE_TAB', id: tab.id, patch: { pollBurstUntil: null } });
+      }, remaining);
+    }
     return () => {
       cancelled = true;
       window.clearInterval(id);
+      if (clearTimer != null) window.clearTimeout(clearTimer);
       headEtagRef.current = null;
     };
-  }, [tab.id, tab.ref, tab.branch, pat, demoMode, dispatch]);
+  }, [tab.id, tab.ref, tab.branch, pat, demoMode, dispatch, tab.pollBurstUntil]);
 
   useEffect(() => {
     if (demoMode || !tab.defaultBranchName || tab.defaultBranchName === tab.branch) return;
@@ -479,11 +492,11 @@ export default function App() {
   }, [activeTab, pat]);
 
   const markApplied = useCallback(() => {
-    if (!activeTab || !activeTab.headSha) return;
+    if (!activeTab || !activeTab.scripts) return;
     dispatch({
       type: 'UPDATE_TAB',
       id: activeTab.id,
-      patch: { anchorSha: activeTab.headSha, scripts: null, genStatus: null },
+      patch: { anchorSha: activeTab.scripts.targetSha, scripts: null, genStatus: null },
     });
   }, [activeTab]);
 
@@ -564,10 +577,44 @@ export default function App() {
                 </select>
               </span>
             )}
-            <span className="text-xs text-zinc-500 ml-auto">
-              {activeTab.lastPoll
-                ? `last polled ${new Date(activeTab.lastPoll).toLocaleTimeString()}`
-                : 'polling…'}
+            <span className="text-xs text-zinc-500 ml-auto flex items-center gap-2">
+              <span>
+                {activeTab.lastPoll
+                  ? `last polled ${new Date(activeTab.lastPoll).toLocaleTimeString()}`
+                  : 'polling…'}
+              </span>
+              <button
+                type="button"
+                title="Refresh now (poll every 5s for 30s)"
+                aria-label="Refresh now"
+                onClick={() =>
+                  dispatch({
+                    type: 'UPDATE_TAB',
+                    id: activeTab.id,
+                    patch: { pollBurstUntil: Date.now() + BURST_DURATION_MS },
+                  })
+                }
+                className="text-zinc-400 hover:text-zinc-100 transition-colors"
+              >
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className={
+                    activeTab.pollBurstUntil != null && activeTab.pollBurstUntil > Date.now()
+                      ? 'animate-spin'
+                      : ''
+                  }
+                >
+                  <path d="M21 12a9 9 0 1 1-3-6.7" />
+                  <polyline points="21 4 21 10 15 10" />
+                </svg>
+              </button>
             </span>
           </div>
           {activeTab.error && (

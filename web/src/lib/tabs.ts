@@ -17,6 +17,7 @@ export interface Tab {
   genStatus: string | null;
   error: string | null;
   lastPoll: number | null;
+  pollBurstUntil: number | null;
 }
 
 export interface TabsState {
@@ -88,5 +89,6 @@ export function makeSkeletonTab(
     genStatus: null,
     error: null,
     lastPoll: null,
+    pollBurstUntil: null,
   };
 }
