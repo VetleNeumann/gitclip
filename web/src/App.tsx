@@ -124,6 +124,7 @@ function TabPoller({
   useEffect(() => {
     if (demoMode || !tab.ref || !tab.branch) return;
     let cancelled = false;
+    const burstActive = tab.pollBurstUntil != null && tab.pollBurstUntil > Date.now();
     const tick = async () => {
       try {
         const result = await getBranchHead(tab.ref, tab.branch, pat, headEtagRef.current);
@@ -134,8 +135,11 @@ function TabPoller({
           return;
         }
         headEtagRef.current = result.etag;
-        dispatch({ type: 'UPDATE_TAB', id: tab.id, patch: { headSha: result.sha, lastPoll } });
-        if (result.sha !== commitsRef.current[0]?.sha) {
+        const shaChanged = result.sha !== commitsRef.current[0]?.sha;
+        const patch: Partial<Tab> = { headSha: result.sha, lastPoll };
+        if (shaChanged && burstActive) patch.pollBurstUntil = null;
+        dispatch({ type: 'UPDATE_TAB', id: tab.id, patch });
+        if (shaChanged) {
           try {
             const fresh = await listCommits(tab.ref, tab.branch, pat);
             if (!cancelled) dispatch({ type: 'UPDATE_TAB', id: tab.id, patch: { commits: fresh } });
@@ -154,7 +158,6 @@ function TabPoller({
       }
     };
     void tick();
-    const burstActive = tab.pollBurstUntil != null && tab.pollBurstUntil > Date.now();
     const intervalMs = burstActive ? BURST_POLL_MS : POLL_MS;
     const id = window.setInterval(tick, intervalMs);
     let clearTimer: number | undefined;
