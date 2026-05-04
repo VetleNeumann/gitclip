@@ -9,6 +9,13 @@ interface Props {
 
 const TAB_KEY = 'gitclip.shellTab';
 
+const RUNNER_ONELINER = 'iex (Get-Clipboard -Raw)';
+
+const ALIAS_INSTALL = `New-Item -Path $PROFILE -ItemType File -Force | Out-Null
+if (-not (Select-String -Path $PROFILE -Pattern 'function gitclip' -Quiet)) {
+  Add-Content $PROFILE "\`nfunction gitclip { & ([scriptblock]::Create((Get-Clipboard -Raw))) }"
+}`;
+
 function loadTab(): 'bash' | 'powershell' {
   const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(TAB_KEY) : null;
   return saved === 'powershell' ? 'powershell' : 'bash';
@@ -16,7 +23,7 @@ function loadTab(): 'bash' | 'powershell' {
 
 export function SyncOutput({ scripts, onApplied, targetSha }: Props) {
   const [tab, setTabState] = useState<'bash' | 'powershell'>(() => loadTab());
-  const [copied, setCopied] = useState(false);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const text = tab === 'bash' ? scripts.bash : scripts.powershell;
 
   useEffect(() => {
@@ -25,11 +32,13 @@ export function SyncOutput({ scripts, onApplied, targetSha }: Props) {
 
   const setTab = (t: 'bash' | 'powershell') => setTabState(t);
 
-  const copy = async () => {
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+  const copyText = async (value: string, key: string) => {
+    await navigator.clipboard.writeText(value);
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey((k) => (k === key ? null : k)), 1500);
   };
+
+  const copy = () => copyText(text, 'script');
 
   const download = () => {
     const blob = new Blob([text], { type: 'text/plain' });
@@ -65,7 +74,7 @@ export function SyncOutput({ scripts, onApplied, targetSha }: Props) {
             onClick={copy}
             className="px-3 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-sm"
           >
-            {copied ? 'copied!' : 'copy'}
+            {copiedKey === 'script' ? 'copied!' : 'copy'}
           </button>
           <button onClick={download} className="px-3 py-1 rounded bg-zinc-800 border border-zinc-700 text-sm">
             download
@@ -79,6 +88,42 @@ export function SyncOutput({ scripts, onApplied, targetSha }: Props) {
           </button>
         </div>
       </div>
+      {tab === 'powershell' && (
+        <div className="border-b border-zinc-800 px-3 py-2 space-y-2 text-xs">
+          <div className="flex items-center gap-2">
+            <span className="text-zinc-500 shrink-0">Run on target:</span>
+            <code className="font-mono text-zinc-200 bg-zinc-900 px-2 py-1 rounded flex-1 overflow-x-auto">
+              {RUNNER_ONELINER}
+            </code>
+            <button
+              onClick={() => copyText(RUNNER_ONELINER, 'runner')}
+              className="px-2 py-1 rounded bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 shrink-0"
+            >
+              {copiedKey === 'runner' ? 'copied!' : 'copy'}
+            </button>
+          </div>
+          <details className="text-zinc-400">
+            <summary className="cursor-pointer select-none hover:text-zinc-200">
+              install <code className="font-mono">gitclip</code> alias (run once on target)
+            </summary>
+            <div className="mt-2 flex items-start gap-2">
+              <pre className="font-mono text-zinc-200 bg-zinc-900 px-2 py-1 rounded flex-1 overflow-x-auto whitespace-pre">
+                {ALIAS_INSTALL}
+              </pre>
+              <button
+                onClick={() => copyText(ALIAS_INSTALL, 'install')}
+                className="px-2 py-1 rounded bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 shrink-0"
+              >
+                {copiedKey === 'install' ? 'copied!' : 'copy'}
+              </button>
+            </div>
+            <p className="mt-2 text-zinc-500">
+              after install: <code className="font-mono">gitclip</code> in PowerShell runs whatever's on the
+              clipboard, isolated in a child scope.
+            </p>
+          </details>
+        </div>
+      )}
       <pre className="text-xs font-mono p-3 overflow-auto max-h-[40vh] whitespace-pre">
         {text}
       </pre>
