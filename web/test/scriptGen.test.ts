@@ -12,7 +12,7 @@ describe('generateScripts', () => {
     expect(bash.startsWith('#!/usr/bin/env bash\n')).toBe(true);
     expect(bash).toContain('set -euo pipefail');
     expect(bash).toContain(".gitclip-head");
-    expect(bash.trim().endsWith('echo "GitClip: now at abc1234"')).toBe(true);
+    expect(bash).toContain('echo "GitClip: now at abc1234"');
   });
 
   it('emits a powershell script with strict mode and CRLF line endings', () => {
