@@ -200,7 +200,9 @@ export async function getFileContent(
     );
     if (data.encoding === 'base64' && data.content) return decodeBase64(data.content);
   } catch (err) {
-    if (!(err instanceof GitHubError) || (err.status !== 403 && err.status !== 404)) throw err;
+    const isBlockableHttp = err instanceof GitHubError && (err.status === 403 || err.status === 404);
+    const isNetworkBlocked = err instanceof TypeError;
+    if (!isBlockableHttp && !isNetworkBlocked) throw err;
   }
   // Fallback: git blob API by sha — handles >1MB files.
   if (!blobSha) {
