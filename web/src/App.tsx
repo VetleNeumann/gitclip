@@ -4,6 +4,7 @@ import { CommitGraph } from './components/CommitGraph';
 import { SyncOutput } from './components/SyncOutput';
 import { LogBuffer } from './components/LogBuffer';
 import { TabBar } from './components/TabBar';
+import { AnchorShaInput } from './components/AnchorShaInput';
 import {
   compareCommits,
   getBranchHead,
@@ -659,6 +660,7 @@ export default function App() {
                   Click a commit to mark it as your current local state.
                 </div>
               )}
+              <AnchorShaInput onSet={setAnchor} />
             </section>
 
             <div className="space-y-5 min-w-0">
