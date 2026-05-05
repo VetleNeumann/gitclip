@@ -202,6 +202,24 @@ function TabPoller({
   return null;
 }
 
+async function mapPool<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i]!, i);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
 export default function App() {
   const [sessionId, setSessionId] = useState<string>(() => getOrCreateSessionId());
   const [pat, setPat] = useState<string | null>(() => localStorage.getItem(PAT_KEY));
@@ -449,28 +467,33 @@ export default function App() {
         });
         return;
       }
-      const ops: FileOp[] = [];
-      let i = 0;
-      for (const f of cmp.files) {
-        i++;
+      const total = cmp.files.length;
+      let done = 0;
+      const slots = await mapPool(cmp.files, 8, async (f) => {
+        let result: FileOp[];
+        if (f.status === 'removed') {
+          result = [{ kind: 'remove', path: f.filename }];
+        } else if (f.status === 'unchanged') {
+          result = [];
+        } else if (f.status === 'renamed' && f.previous_filename) {
+          const content = await getFileContent(ref, f.filename, headSha, f.sha, pat);
+          result = [
+            { kind: 'remove', path: f.previous_filename },
+            { kind: 'write', path: f.filename, content },
+          ];
+        } else {
+          const content = await getFileContent(ref, f.filename, headSha, f.sha, pat);
+          result = [{ kind: 'write', path: f.filename, content }];
+        }
+        done++;
         dispatch({
           type: 'UPDATE_TAB',
           id: tabId,
-          patch: { genStatus: `Fetching file ${i}/${cmp.files.length}: ${f.filename}` },
+          patch: { genStatus: `Fetched ${done}/${total}: ${f.filename}` },
         });
-        if (f.status === 'removed') {
-          ops.push({ kind: 'remove', path: f.filename });
-        } else if (f.status === 'renamed' && f.previous_filename) {
-          ops.push({ kind: 'remove', path: f.previous_filename });
-          const content = await getFileContent(ref, f.filename, headSha, f.sha, pat);
-          ops.push({ kind: 'write', path: f.filename, content });
-        } else if (f.status === 'unchanged') {
-          continue;
-        } else {
-          const content = await getFileContent(ref, f.filename, headSha, f.sha, pat);
-          ops.push({ kind: 'write', path: f.filename, content });
-        }
-      }
+        return result;
+      });
+      const ops: FileOp[] = slots.flat();
       dispatch({ type: 'UPDATE_TAB', id: tabId, patch: { genStatus: 'Rendering scripts…' } });
       const generated = generateScripts({ ops, targetSha: headSha });
       dispatch({
