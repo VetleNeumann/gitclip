@@ -495,7 +495,7 @@ export default function App() {
       });
       const ops: FileOp[] = slots.flat();
       dispatch({ type: 'UPDATE_TAB', id: tabId, patch: { genStatus: 'Rendering scripts…' } });
-      const generated = generateScripts({ ops, targetSha: headSha });
+      const generated = generateScripts({ ops, targetSha: headSha, fromSha: anchorSha });
       dispatch({
         type: 'UPDATE_TAB',
         id: tabId,

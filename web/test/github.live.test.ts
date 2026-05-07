@@ -62,9 +62,10 @@ describe.skipIf(skip)('live GitHub integration', () => {
       }
     }
 
-    const { bash } = generateScripts({ ops, targetSha: head });
+    const { bash } = generateScripts({ ops, targetSha: head, fromSha: base });
     const root = mkdtempSync(join(tmpdir(), 'gitclip-live-'));
     try {
+      writeFileSync(join(root, '.gitclip-head'), `${base}\n`);
       writeFileSync(join(root, 'apply.sh'), bash);
       execFileSync('bash', ['apply.sh'], { cwd: root, stdio: 'pipe' });
       // For each write op, verify the file content matches what we sent.
