@@ -9,7 +9,7 @@ interface Props {
 
 const TAB_KEY = 'gitclip.shellTab';
 
-const RUNNER_ONELINER = 'iex (Get-Clipboard -Raw)';
+const RUNNER_ONELINER = '& ([scriptblock]::Create((Get-Clipboard -Raw)))';
 
 const ALIAS_INSTALL = `New-Item -Path $PROFILE -ItemType File -Force | Out-Null
 if (-not (Select-String -Path $PROFILE -Pattern 'function gitclip' -Quiet)) {

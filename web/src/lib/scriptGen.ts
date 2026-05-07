@@ -170,7 +170,7 @@ function emitPowerShell(ops: FileOp[], targetSha: string, fromSha: string): stri
   out.push('    } else {');
   out.push('      [Console]::Error.WriteLine("GitClip error: .gitclip-head at $_gcAnchor is $_gcFound, paste expects $_gcExpect.")');
   out.push('      [Console]::Error.WriteLine("Regenerate paste from $_gcFound, or set GITCLIP_FORCE=1 to override.")');
-  out.push('      exit 1');
+  out.push('      throw "GitClip: anchor mismatch"');
   out.push('    }');
   out.push('  }');
   out.push('} else {');
@@ -184,11 +184,11 @@ function emitPowerShell(ops: FileOp[], targetSha: string, fromSha: string): stri
   out.push('    } catch {');
   out.push('      [Console]::Error.WriteLine("GitClip error: no .gitclip-head found and no interactive console.")');
   out.push('      [Console]::Error.WriteLine("Set GITCLIP_FORCE=1 to apply in $_gcRoot anyway.")');
-  out.push('      exit 1');
+  out.push('      throw "GitClip: no anchor and no interactive console"');
   out.push('    }');
   out.push('    if ($_gcReply -notmatch "^(y|Y|yes|YES|Yes)$") {');
   out.push('      Write-Host "GitClip: aborted."');
-  out.push('      exit 1');
+  out.push('      throw "GitClip: aborted by user"');
   out.push('    }');
   out.push('  }');
   out.push('}');
