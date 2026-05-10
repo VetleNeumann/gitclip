@@ -18,18 +18,30 @@ export default async (req: Request): Promise<Response> => {
   const session = readSession(req);
   if (session instanceof Response) return session;
 
-  let payload: { content?: unknown };
+  let payload: { content?: unknown; enc?: unknown };
   try {
-    payload = (await req.json()) as { content?: unknown };
+    payload = (await req.json()) as { content?: unknown; enc?: unknown };
   } catch {
     return jsonResponse(400, { error: 'invalid JSON body' });
   }
 
   if (typeof payload.content !== 'string')
     return jsonResponse(400, { error: 'body.content must be a string' });
-  if (payload.content.length === 0)
+
+  let content: string;
+  if (payload.enc === 'b64') {
+    try {
+      content = Buffer.from(payload.content, 'base64').toString('utf8');
+    } catch {
+      return jsonResponse(400, { error: 'body.content not valid base64' });
+    }
+  } else {
+    content = payload.content;
+  }
+
+  if (content.length === 0)
     return jsonResponse(400, { error: 'body.content must be non-empty' });
-  if (payload.content.length > MAX_WRITE_BYTES)
+  if (content.length > MAX_WRITE_BYTES)
     return jsonResponse(413, {
       error: `body.content exceeds ${MAX_WRITE_BYTES} byte cap`,
     });
@@ -45,7 +57,7 @@ export default async (req: Request): Promise<Response> => {
     state = existing;
   }
 
-  state.entries.push({ at: now, text: payload.content });
+  state.entries.push({ at: now, text: content });
   state.updatedAt = now;
   trimToCap(state, MAX_TOTAL_BYTES);
 

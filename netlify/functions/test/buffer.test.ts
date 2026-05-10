@@ -54,6 +54,16 @@ describe('buffer-write', () => {
     expect((await writeHandler(req('POST', '/api/buffer-write', { content: 123 }))).status).toBe(400);
   });
 
+  it('decodes base64 content when enc=b64 and stores plaintext', async () => {
+    const plain = 'PS C:\\ws> whoami\nkda\\vetlean';
+    const b64 = Buffer.from(plain, 'utf8').toString('base64');
+    const r = await writeHandler(req('POST', '/api/buffer-write', { content: b64, enc: 'b64' }));
+    expect(r.status).toBe(200);
+    const read = await readHandler(req('GET', '/api/buffer-read'));
+    const body = (await read.json()) as { entries: { text: string }[] };
+    expect(body.entries[0]!.text).toBe(plain);
+  });
+
   it('appends entries and reports counts', async () => {
     const r1 = await writeHandler(req('POST', '/api/buffer-write', { content: 'first' }));
     expect(r1.status).toBe(200);
