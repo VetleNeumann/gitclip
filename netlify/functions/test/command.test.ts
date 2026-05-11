@@ -1,0 +1,153 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  appendCommandEntry,
+  emptyCommandState,
+  MAX_TOTAL_BYTES,
+  MAX_WRITE_BYTES,
+  SESSION_TTL_MS,
+  totalCommandBytes,
+  trimCommandToCap,
+  UUID_RE,
+  type CommandState,
+} from '../_lib.js';
+
+const store = new Map<string, unknown>();
+vi.mock('@netlify/blobs', () => ({
+  getStore: () => ({
+    async get(key: string, opts: { type?: string }) {
+      const v = store.get(key);
+      if (v === undefined) return null;
+      if (opts.type === 'json') return v;
+      return JSON.stringify(v);
+    },
+    async setJSON(key: string, value: unknown) {
+      store.set(key, value);
+    },
+    async delete(key: string) {
+      store.delete(key);
+    },
+  }),
+}));
+
+const { default: writeHandler } = await import('../cmd-write.js');
+const { default: readHandler } = await import('../cmd-read.js');
+
+const SESSION = 'abcdefghijklmnop1234';
+
+function req(method: string, path: string, body?: unknown, session: string | null = SESSION): Request {
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (session) headers.authorization = `Bearer ${session}`;
+  return new Request(`http://x${path}`, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
+function toB64(text: string): string {
+  return Buffer.from(text, 'utf8').toString('base64');
+}
+
+beforeEach(() => {
+  store.clear();
+  vi.useRealTimers();
+});
+
+describe('command state helpers', () => {
+  it('appends command entries with UUID ids and tracks totals', () => {
+    const state = emptyCommandState(1000);
+    const first = appendCommandEntry(state, { shell: 'bash', script: 'echo one' }, 1100);
+    const second = appendCommandEntry(state, { shell: 'pwsh', script: 'Get-Process' }, 1200);
+
+    expect(first.id).toMatch(UUID_RE);
+    expect(second.id).toMatch(UUID_RE);
+    expect(state.entries.map((entry) => entry.script)).toEqual(['echo one', 'Get-Process']);
+    expect(state.updatedAt).toBe(1200);
+    expect(totalCommandBytes(state)).toBe('echo one'.length + 'Get-Process'.length);
+  });
+
+  it('trims FIFO when over the cap', () => {
+    const state: CommandState = {
+      createdAt: 0,
+      updatedAt: 0,
+      entries: [
+        { id: 'a', at: 1, shell: 'bash', script: 'A' },
+        { id: 'b', at: 2, shell: 'bash', script: 'B' },
+        { id: 'c', at: 3, shell: 'bash', script: 'C' },
+      ],
+    };
+    trimCommandToCap(state, 2);
+    expect(state.entries.map((entry) => entry.id)).toEqual(['b', 'c']);
+  });
+});
+
+describe('cmd-write', () => {
+  it('rejects without bearer', async () => {
+    const r = await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo hi'), enc: 'b64', shell: 'bash' }, null));
+    expect(r.status).toBe(401);
+  });
+
+  it('rejects malformed session', async () => {
+    const r = await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo hi'), enc: 'b64', shell: 'bash' }, 'short'));
+    expect(r.status).toBe(400);
+  });
+
+  it('rejects oversized command payloads', async () => {
+    const oversized = 'x'.repeat(MAX_WRITE_BYTES + 1);
+    const r = await writeHandler(req('POST', '/api/cmd-write', { content: toB64(oversized), enc: 'b64', shell: 'bash' }));
+    expect(r.status).toBe(413);
+  });
+
+  it('persists UUID entries and enforces FIFO cap', async () => {
+    const chunkSize = 250 * 1024;
+
+    for (let i = 0; i < 5; i++) {
+      const script = `${i}:${'x'.repeat(chunkSize - 2)}`;
+      const r = await writeHandler(req('POST', '/api/cmd-write', { content: toB64(script), enc: 'b64', shell: 'bash' }));
+      expect(r.status).toBe(200);
+      const body = (await r.json()) as { id: string };
+      expect(body.id).toMatch(UUID_RE);
+    }
+
+    const read = await readHandler(req('GET', '/api/cmd-read'));
+    expect(read.status).toBe(200);
+    const body = (await read.json()) as { entries: { script: string }[]; totalBytes: number };
+    expect(body.entries).toHaveLength(4);
+    expect(body.entries[0]!.script.startsWith('1:')).toBe(true);
+    expect(body.entries[3]!.script.startsWith('4:')).toBe(true);
+    const total = body.entries.reduce((n, entry) => n + entry.script.length, 0);
+    expect(total).toBeLessThanOrEqual(MAX_TOTAL_BYTES);
+  });
+});
+
+describe('cmd-read', () => {
+  it('is non-destructive across repeated reads', async () => {
+    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo first'), enc: 'b64', shell: 'bash' }));
+    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo second'), enc: 'b64', shell: 'pwsh' }));
+
+    const r1 = await readHandler(req('GET', '/api/cmd-read'));
+    const body1 = (await r1.json()) as { entries: { shell: string; script: string }[] };
+
+    const r2 = await readHandler(req('GET', '/api/cmd-read'));
+    const body2 = (await r2.json()) as { entries: { shell: string; script: string }[] };
+
+    expect(body1.entries).toEqual([
+      { shell: 'bash', script: 'echo first', id: expect.any(String), at: expect.any(Number) },
+      { shell: 'pwsh', script: 'echo second', id: expect.any(String), at: expect.any(Number) },
+    ]);
+    expect(body2.entries).toEqual(body1.entries);
+  });
+
+  it('treats stale queue data as expired', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo stale'), enc: 'b64', shell: 'bash' }));
+
+    vi.setSystemTime(SESSION_TTL_MS + 1);
+    const read = await readHandler(req('GET', '/api/cmd-read'));
+    const body = (await read.json()) as { entries: unknown[] };
+
+    expect(body.entries).toEqual([]);
+  });
+});

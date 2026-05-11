@@ -3,6 +3,7 @@ import { RepoForm } from './components/RepoForm';
 import { CommitGraph } from './components/CommitGraph';
 import { SyncOutput } from './components/SyncOutput';
 import { LogBuffer } from './components/LogBuffer';
+import { CommandQueue } from './components/CommandQueue';
 import { TabBar } from './components/TabBar';
 import { AnchorShaInput } from './components/AnchorShaInput';
 import {
@@ -777,6 +778,9 @@ export default function App() {
                   sessionId={sessionId}
                   onRotate={() => setSessionId(rotateSessionId())}
                 />
+              </section>
+              <section className="rounded border border-zinc-800 p-4">
+                <CommandQueue sessionId={sessionId} />
               </section>
             </div>
           </div>

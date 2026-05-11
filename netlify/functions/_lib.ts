@@ -1,4 +1,5 @@
 import { getStore } from '@netlify/blobs';
+import { randomUUID } from 'node:crypto';
 
 export const SESSION_RE = /^[a-zA-Z0-9_-]{16,64}$/;
 export const MAX_WRITE_BYTES = 256 * 1024;
@@ -10,6 +11,24 @@ export interface BufferState {
   updatedAt: number;
   entries: { at: number; text: string }[];
 }
+
+export type CommandShell = 'bash' | 'pwsh';
+
+export interface CommandEntry {
+  id: string;
+  at: number;
+  shell: CommandShell;
+  script: string;
+}
+
+export interface CommandState {
+  createdAt: number;
+  updatedAt: number;
+  entries: CommandEntry[];
+}
+
+export const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export function jsonResponse(status: number, body: unknown, extraHeaders: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
@@ -48,10 +67,44 @@ export function trimToCap(state: BufferState, cap: number): void {
   }
 }
 
-export function isExpired(state: BufferState, now = Date.now()): boolean {
+export function totalCommandBytes(state: CommandState): number {
+  return state.entries.reduce((n, e) => n + e.script.length, 0);
+}
+
+export function trimCommandToCap(state: CommandState, cap: number): void {
+  while (state.entries.length > 1 && totalCommandBytes(state) > cap) {
+    state.entries.shift();
+  }
+}
+
+export function appendCommandEntry(
+  state: CommandState,
+  input: { shell: CommandShell; script: string },
+  now = Date.now(),
+): CommandEntry {
+  const entry: CommandEntry = {
+    id: randomUUID(),
+    at: now,
+    shell: input.shell,
+    script: input.script,
+  };
+  state.entries.push(entry);
+  state.updatedAt = now;
+  return entry;
+}
+
+export function isCommandShell(value: unknown): value is CommandShell {
+  return value === 'bash' || value === 'pwsh';
+}
+
+export function isExpired(state: { createdAt: number }, now = Date.now()): boolean {
   return now - state.createdAt > SESSION_TTL_MS;
 }
 
 export function emptyState(now = Date.now()): BufferState {
+  return { createdAt: now, updatedAt: now, entries: [] };
+}
+
+export function emptyCommandState(now = Date.now()): CommandState {
   return { createdAt: now, updatedAt: now, entries: [] };
 }

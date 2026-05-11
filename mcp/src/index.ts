@@ -31,6 +31,13 @@ interface BufferResponse {
   updatedAt?: number;
 }
 
+interface CommandWriteResponse {
+  ok: boolean;
+  id: string;
+  pendingCount: number;
+  totalBytes: number;
+}
+
 function getSession(): string {
   const s = process.env.GITCLIP_SESSION ?? readSessionFromFile();
   if (!s) {
@@ -88,12 +95,34 @@ async function clearBuffer(): Promise<void> {
   }
 }
 
+async function sendCommand(script: string, shell: 'bash' | 'pwsh'): Promise<CommandWriteResponse> {
+  const session = getSession();
+  const url = `${getOrigin()}/api/cmd-write`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${session}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      content: Buffer.from(script, 'utf8').toString('base64'),
+      enc: 'b64',
+      shell,
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`cmd-write failed: HTTP ${res.status} ${res.statusText} — ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as CommandWriteResponse;
+}
+
 async function main(): Promise<void> {
   const server = new McpServer(
     { name: 'gitclip', version: '0.1.0' },
     {
       instructions:
-        'Use read_buffer to drain logs/error output that the user pasted into the GitClip web UI. The buffer is cleared atomically on read.',
+        'Use read_buffer to drain logs/error output from the GitClip web UI, clear_buffer to drop pending logs, and send_command to queue a script for the user to copy on the airgapped browser.',
     },
   );
 
@@ -110,6 +139,38 @@ async function main(): Promise<void> {
       try {
         const text = await readBuffer();
         return { content: [{ type: 'text', text }] };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text', text: message }], isError: true };
+      }
+    },
+  );
+
+  server.registerTool(
+    'send_command',
+    {
+      title: 'Send command to GitClip command queue',
+      description:
+        'Queue a shell command/script in the GitClip command queue for this session. The airgapped browser polls and shows each entry with a copy button.',
+      inputSchema: z
+        .object({
+          script: z.string().min(1, 'script must be non-empty'),
+          shell: z.enum(['bash', 'pwsh']),
+        })
+        .shape,
+      annotations: { readOnlyHint: false, idempotentHint: false },
+    },
+    async ({ script, shell }) => {
+      try {
+        const result = await sendCommand(script, shell);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `queued ${shell} command ${result.id} (${result.pendingCount} pending)`,
+            },
+          ],
+        };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return { content: [{ type: 'text', text: message }], isError: true };
