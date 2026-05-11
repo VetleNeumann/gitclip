@@ -267,6 +267,8 @@ describe('cmd-clear-all', () => {
 
     const cleared = await clearAllHandler(req('DELETE', '/api/cmd-clear-all'));
     expect(cleared.status).toBe(200);
+    const clearedBody = (await cleared.json()) as { ok: boolean };
+    expect(clearedBody).toEqual({ ok: true });
 
     const read = await readHandler(req('GET', '/api/cmd-read'));
     const body = (await read.json()) as { entries: unknown[] };
@@ -284,5 +286,10 @@ describe('cmd-clear-all', () => {
 
     const malformed = await clearAllHandler(req('DELETE', '/api/cmd-clear-all', undefined, 'short'));
     expect(malformed.status).toBe(400);
+  });
+
+  it('rejects non-DELETE requests', async () => {
+    const r = await clearAllHandler(req('GET', '/api/cmd-clear-all'));
+    expect(r.status).toBe(405);
   });
 });
