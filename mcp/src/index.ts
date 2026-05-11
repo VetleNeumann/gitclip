@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { formatPendingCommands, formatSendCommandQueuedText } from './commandQueue.js';
 import { resolveShellFlavor, type ShellFlavor } from './shellFlavor.js';
 
 const DEFAULT_URL = 'https://gitclip-vetle.netlify.app';
@@ -28,6 +29,12 @@ function readSessionFromFile(): string | null {
 interface BufferResponse {
   entries: { at: number; text: string }[];
   cleared: boolean;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+interface CommandReadResponse {
+  entries: { at: number; shell: ShellFlavor; script: string }[];
   createdAt?: number;
   updatedAt?: number;
 }
@@ -126,12 +133,27 @@ async function sendCommand(script: string, shell: ShellFlavor): Promise<CommandW
   return (await res.json()) as CommandWriteResponse;
 }
 
+async function listPendingCommands(): Promise<string> {
+  const session = getSession();
+  const url = `${getOrigin()}/api/cmd-read`;
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: { authorization: `Bearer ${session}` },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`cmd-read failed: HTTP ${res.status} ${res.statusText} — ${body.slice(0, 200)}`);
+  }
+  const json = (await res.json()) as CommandReadResponse;
+  return formatPendingCommands(json.entries);
+}
+
 async function main(): Promise<void> {
   const server = new McpServer(
     { name: 'gitclip', version: '0.1.0' },
     {
       instructions:
-        'Use read_buffer to drain logs/error output from the GitClip web UI, clear_buffer to drop pending logs, and send_command to queue a script for the user to copy on the airgapped browser.',
+        'Use read_buffer to drain logs/error output from the GitClip web UI, clear_buffer to drop pending logs, send_command to queue a script for the user to copy on the airgapped browser, and list_pending_commands to peek at queued commands without clearing.',
     },
   );
 
@@ -181,10 +203,30 @@ async function main(): Promise<void> {
           content: [
             {
               type: 'text',
-              text: `queued ${resolvedShell} command ${result.id} (${result.pendingCount} pending)`,
+              text: formatSendCommandQueuedText(resolvedShell, result),
             },
           ],
         };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text', text: message }], isError: true };
+      }
+    },
+  );
+
+  server.registerTool(
+    'list_pending_commands',
+    {
+      title: 'List pending GitClip commands',
+      description:
+        'Fetch pending command-queue entries for this session without mutating the queue. Returns "(no pending commands)" when empty.',
+      inputSchema: z.object({}).shape,
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async () => {
+      try {
+        const text = await listPendingCommands();
+        return { content: [{ type: 'text', text }] };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return { content: [{ type: 'text', text: message }], isError: true };

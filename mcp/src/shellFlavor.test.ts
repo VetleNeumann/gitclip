@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { resolveShellFlavor } from './shellFlavor.js';
+import { formatPendingCommands, formatSendCommandQueuedText } from './commandQueue.js';
 
 test('returns per-call override and skips config lookup', () => {
   const reads: string[] = [];
@@ -106,3 +107,32 @@ test('errors with all writable config locations when unset', () => {
   );
 });
 
+test('formats pending commands as timestamped blocks', () => {
+  const text = formatPendingCommands([
+    { at: Date.parse('2026-01-02T03:04:05.000Z'), shell: 'bash', script: 'echo one' },
+    { at: Date.parse('2026-01-02T03:05:06.000Z'), shell: 'pwsh', script: 'Get-Process' },
+  ]);
+
+  assert.equal(
+    text,
+    '--- bash command @ 2026-01-02T03:04:05.000Z ---\n' +
+      'echo one\n\n' +
+      '--- pwsh command @ 2026-01-02T03:05:06.000Z ---\n' +
+      'Get-Process',
+  );
+});
+
+test('formats empty pending queue with clear message', () => {
+  assert.equal(formatPendingCommands([]), '(no pending commands)');
+});
+
+test('includes pendingCount in send_command success text', () => {
+  const text = formatSendCommandQueuedText('bash', {
+    id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    pendingCount: 3,
+  });
+  assert.equal(
+    text,
+    'queued bash command aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa (pendingCount=3)',
+  );
+});
