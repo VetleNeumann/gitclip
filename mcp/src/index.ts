@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { resolveShellFlavor, type ShellFlavor } from './shellFlavor.js';
 
 const DEFAULT_URL = 'https://gitclip-vetle.netlify.app';
 const SESSION_RE = /^[a-zA-Z0-9_-]{16,64}$/;
@@ -36,6 +37,14 @@ interface CommandWriteResponse {
   id: string;
   pendingCount: number;
   totalBytes: number;
+}
+
+function readTextFile(path: string): string | null {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
 }
 
 function getSession(): string {
@@ -95,7 +104,7 @@ async function clearBuffer(): Promise<void> {
   }
 }
 
-async function sendCommand(script: string, shell: 'bash' | 'pwsh'): Promise<CommandWriteResponse> {
+async function sendCommand(script: string, shell: ShellFlavor): Promise<CommandWriteResponse> {
   const session = getSession();
   const url = `${getOrigin()}/api/cmd-write`;
   const res = await fetch(url, {
@@ -155,19 +164,24 @@ async function main(): Promise<void> {
       inputSchema: z
         .object({
           script: z.string().min(1, 'script must be non-empty'),
-          shell: z.enum(['bash', 'pwsh']),
+          shell: z.string().optional(),
         })
         .shape,
       annotations: { readOnlyHint: false, idempotentHint: false },
     },
     async ({ script, shell }) => {
       try {
-        const result = await sendCommand(script, shell);
+        const resolvedShell = resolveShellFlavor({
+          shell,
+          env: process.env,
+          read: readTextFile,
+        });
+        const result = await sendCommand(script, resolvedShell);
         return {
           content: [
             {
               type: 'text',
-              text: `queued ${shell} command ${result.id} (${result.pendingCount} pending)`,
+              text: `queued ${resolvedShell} command ${result.id} (${result.pendingCount} pending)`,
             },
           ],
         };
