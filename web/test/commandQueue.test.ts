@@ -52,6 +52,12 @@ describe('readCommandQueue', () => {
 
     const result = await readCommandQueue('abcdefghijklmnop1234');
 
+    expect(fetchMock).toHaveBeenCalledWith('/api/cmd-read', {
+      method: 'GET',
+      headers: {
+        authorization: 'Bearer abcdefghijklmnop1234',
+      },
+    });
     expect(result.notModified).toBe(false);
     expect(result.etag).toBe('W/"100-0"');
     expect(result.state).toEqual({
