@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { readCommandQueue, type CommandEntry } from '../lib/commandQueue';
+import { dismissCommandEntry, readCommandQueue, type CommandEntry } from '../lib/commandQueue';
 
 const POLL_MS = 5_000;
 
@@ -16,6 +16,7 @@ export function CommandQueue({ sessionId }: Props) {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [dismissingId, setDismissingId] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -57,6 +58,28 @@ export function CommandQueue({ sessionId }: Props) {
     }
   };
 
+  const dismiss = async (entry: CommandEntry) => {
+    if (dismissingId) return;
+    const priorEntries = entries;
+    setStatus(null);
+    setDismissingId(entry.id);
+    setEntries((current) => current.filter((candidate) => candidate.id !== entry.id));
+    setCopiedId((current) => (current === entry.id ? null : current));
+    try {
+      const state = await dismissCommandEntry(sessionId, entry.id);
+      setEntries(state.entries);
+      setCopiedId((current) =>
+        current && !state.entries.some((candidate) => candidate.id === current) ? null : current,
+      );
+      setStatus(`dismissed command ${entry.id.slice(0, 8)}…`);
+    } catch (err) {
+      setEntries(priorEntries);
+      setStatus(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDismissingId(null);
+    }
+  };
+
   return (
     <section className="space-y-3">
       <header className="flex items-center justify-between">
@@ -76,12 +99,23 @@ export function CommandQueue({ sessionId }: Props) {
                 <span>
                   {formatAt(entry.at)} · <span className="text-zinc-300">{entry.shell}</span>
                 </span>
-                <button
-                  onClick={() => void copy(entry)}
-                  className="px-2 py-1 rounded bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 text-xs whitespace-nowrap"
-                >
-                  {copiedId === entry.id ? 'copied' : 'copy'}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => void copy(entry)}
+                    className="px-2 py-1 rounded bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 text-xs whitespace-nowrap"
+                  >
+                    {copiedId === entry.id ? 'copied' : 'copy'}
+                  </button>
+                  <button
+                    onClick={() => void dismiss(entry)}
+                    disabled={Boolean(dismissingId)}
+                    className="px-2 py-1 rounded bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 disabled:opacity-60 disabled:cursor-not-allowed text-xs whitespace-nowrap"
+                    aria-label={`dismiss command ${entry.id.slice(0, 8)}`}
+                    title="Dismiss command"
+                  >
+                    {dismissingId === entry.id ? '...' : 'x'}
+                  </button>
+                </div>
               </div>
               <pre className="bg-zinc-900 border border-zinc-800 rounded p-2 text-xs font-mono overflow-auto whitespace-pre-wrap break-all">
                 <code>{entry.script}</code>

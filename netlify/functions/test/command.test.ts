@@ -31,6 +31,7 @@ vi.mock('@netlify/blobs', () => ({
 
 const { default: writeHandler } = await import('../cmd-write.js');
 const { default: readHandler } = await import('../cmd-read.js');
+const { default: dismissHandler } = await import('../cmd-dismiss.js');
 
 const SESSION = 'abcdefghijklmnop1234';
 
@@ -152,5 +153,53 @@ describe('cmd-read', () => {
     const body = (await read.json()) as { entries: unknown[] };
 
     expect(body.entries).toEqual([]);
+  });
+});
+
+describe('cmd-dismiss', () => {
+  it('dismisses one entry and keeps siblings intact', async () => {
+    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo first'), enc: 'b64', shell: 'bash' }));
+    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo second'), enc: 'b64', shell: 'pwsh' }));
+    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo third'), enc: 'b64', shell: 'bash' }));
+
+    const before = await readHandler(req('GET', '/api/cmd-read'));
+    const beforeBody = (await before.json()) as {
+      entries: { id: string; at: number; shell: string; script: string }[];
+      updatedAt: number;
+    };
+    const [first, second, third] = beforeBody.entries;
+    expect(first).toBeTruthy();
+    expect(second).toBeTruthy();
+    expect(third).toBeTruthy();
+
+    const dismissed = await dismissHandler(req('DELETE', `/api/cmd-dismiss?id=${second!.id}`));
+    expect(dismissed.status).toBe(200);
+    const dismissedBody = (await dismissed.json()) as {
+      entries: { id: string; at: number; shell: string; script: string }[];
+      updatedAt: number;
+    };
+    expect(dismissedBody.entries).toEqual([first, third]);
+    expect(dismissedBody.updatedAt).toBeGreaterThan(beforeBody.updatedAt);
+
+    const after = await readHandler(req('GET', '/api/cmd-read'));
+    const afterBody = (await after.json()) as { entries: { id: string }[] };
+    expect(afterBody.entries.map((entry) => entry.id)).toEqual([first!.id, third!.id]);
+  });
+
+  it('rejects missing id query', async () => {
+    const r = await dismissHandler(req('DELETE', '/api/cmd-dismiss'));
+    expect(r.status).toBe(400);
+  });
+
+  it('rejects malformed id query', async () => {
+    const r = await dismissHandler(req('DELETE', '/api/cmd-dismiss?id=not-a-uuid'));
+    expect(r.status).toBe(400);
+  });
+
+  it('returns 404 when id is not in queue', async () => {
+    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo hi'), enc: 'b64', shell: 'bash' }));
+    const missing = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const r = await dismissHandler(req('DELETE', `/api/cmd-dismiss?id=${missing}`));
+    expect(r.status).toBe(404);
   });
 });
