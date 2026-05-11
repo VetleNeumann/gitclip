@@ -48,7 +48,7 @@ describe.skipIf(skip)('live GitHub integration', () => {
       expect(commits[0]!.sha).toMatch(/^[0-9a-f]{40}$/);
     } catch (err) {
       if (isRateLimitError(err)) {
-        ctx.skip('GitHub API rate limit exceeded');
+        ctx.skip();
       }
       throw err;
     }
@@ -96,7 +96,7 @@ describe.skipIf(skip)('live GitHub integration', () => {
       }
     } catch (err) {
       if (isRateLimitError(err)) {
-        ctx.skip('GitHub API rate limit exceeded');
+        ctx.skip();
       }
       throw err;
     }
