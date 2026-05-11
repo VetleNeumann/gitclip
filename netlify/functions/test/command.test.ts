@@ -189,11 +189,15 @@ describe('cmd-dismiss', () => {
   it('rejects missing id query', async () => {
     const r = await dismissHandler(req('DELETE', '/api/cmd-dismiss'));
     expect(r.status).toBe(400);
+    const body = (await r.json()) as { error: string };
+    expect(body.error).toBe('query id is required');
   });
 
   it('rejects malformed id query', async () => {
     const r = await dismissHandler(req('DELETE', '/api/cmd-dismiss?id=not-a-uuid'));
     expect(r.status).toBe(400);
+    const body = (await r.json()) as { error: string };
+    expect(body.error).toBe('query id must be a UUID');
   });
 
   it('returns 404 when id is not in queue', async () => {
@@ -201,5 +205,7 @@ describe('cmd-dismiss', () => {
     const missing = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
     const r = await dismissHandler(req('DELETE', `/api/cmd-dismiss?id=${missing}`));
     expect(r.status).toBe(404);
+    const body = (await r.json()) as { error: string };
+    expect(body.error).toBe('command id not found');
   });
 });
