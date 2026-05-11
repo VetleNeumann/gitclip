@@ -76,3 +76,23 @@ export async function dismissCommandEntry(sessionId: string, id: string): Promis
   }
   return (await res.json()) as CommandQueueResponse;
 }
+
+export async function clearCommandQueue(sessionId: string): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch('/api/cmd-clear-all', {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${sessionId}` },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `cmd-clear-all network error: ${msg}. Likely WAF / corp proxy / browser extension blocking the request.`,
+    );
+  }
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`cmd-clear-all failed: ${res.status} ${res.statusText} — ${body.slice(0, 200)}`);
+  }
+}

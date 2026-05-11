@@ -35,6 +35,7 @@ vi.mock('@netlify/blobs', () => ({
 const { default: writeHandler } = await import('../cmd-write.js');
 const { default: readHandler } = await import('../cmd-read.js');
 const { default: dismissHandler } = await import('../cmd-dismiss.js');
+const { default: clearAllHandler } = await import('../cmd-clear-all.js');
 
 const SESSION = 'abcdefghijklmnop1234';
 
@@ -256,5 +257,32 @@ describe('cmd-dismiss', () => {
     expect(r.status).toBe(404);
     const body = (await r.json()) as { error: string };
     expect(body.error).toBe('command id not found');
+  });
+});
+
+describe('cmd-clear-all', () => {
+  it('deletes all entries and cmd-read returns empty', async () => {
+    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo one'), enc: 'b64', shell: 'bash' }));
+    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo two'), enc: 'b64', shell: 'pwsh' }));
+
+    const cleared = await clearAllHandler(req('DELETE', '/api/cmd-clear-all'));
+    expect(cleared.status).toBe(200);
+
+    const read = await readHandler(req('GET', '/api/cmd-read'));
+    const body = (await read.json()) as { entries: unknown[] };
+    expect(body.entries).toEqual([]);
+  });
+
+  it('returns success when the queue is already empty', async () => {
+    const r = await clearAllHandler(req('DELETE', '/api/cmd-clear-all'));
+    expect(r.status).toBe(200);
+  });
+
+  it('rejects missing and malformed bearer sessions', async () => {
+    const missing = await clearAllHandler(req('DELETE', '/api/cmd-clear-all', undefined, null));
+    expect(missing.status).toBe(401);
+
+    const malformed = await clearAllHandler(req('DELETE', '/api/cmd-clear-all', undefined, 'short'));
+    expect(malformed.status).toBe(400);
   });
 });

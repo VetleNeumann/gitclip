@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { dismissCommandEntry, readCommandQueue, type CommandEntry } from '../lib/commandQueue';
+import {
+  clearCommandQueue,
+  dismissCommandEntry,
+  readCommandQueue,
+  type CommandEntry,
+} from '../lib/commandQueue';
 import {
   clearCommandCopied,
   listCopiedCommandIds,
@@ -100,6 +105,29 @@ export function CommandQueue({ sessionId }: Props) {
     }
   };
 
+  const clearAll = async () => {
+    if (entries.length === 0) return;
+    const noun = entries.length === 1 ? 'command' : 'commands';
+    const confirmed = window.confirm(`Clear all ${entries.length} pending ${noun}?`);
+    if (!confirmed) return;
+
+    const priorEntries = entries;
+    setBusy(true);
+    setStatus(null);
+    try {
+      await clearCommandQueue(sessionId);
+      for (const entry of priorEntries) clearCommandCopied(entry.id);
+      setEntries([]);
+      setCopiedIds(new Set());
+      etagRef.current = null;
+      setStatus('command queue cleared');
+    } catch (err) {
+      setStatus(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <section className="space-y-3">
       <header className="flex items-center justify-between">
@@ -112,9 +140,20 @@ export function CommandQueue({ sessionId }: Props) {
             </>
           )}
         </h2>
-        <span className="text-xs text-zinc-500">
-          polls every 5s{busy ? ' (refreshing...)' : ''}
-        </span>
+        <div className="flex items-center gap-3">
+          {entries.length > 0 && (
+            <button
+              onClick={() => void clearAll()}
+              disabled={busy}
+              className="text-xs underline text-zinc-400 hover:text-zinc-300 disabled:no-underline disabled:text-zinc-600"
+            >
+              clear all
+            </button>
+          )}
+          <span className="text-xs text-zinc-500">
+            polls every 5s{busy ? ' (refreshing...)' : ''}
+          </span>
+        </div>
       </header>
 
       {entries.length === 0 ? (
