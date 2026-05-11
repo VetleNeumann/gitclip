@@ -1,9 +1,12 @@
 import {
   bufferStore,
+  corsHeaders,
   emptyCommandState,
+  etagFor,
   isExpired,
   jsonResponse,
   readSession,
+  serializeCommandState,
   type CommandState,
 } from './_lib.js';
 
@@ -21,26 +24,27 @@ export default async (req: Request): Promise<Response> => {
   const store = bufferStore();
   const existing = (await store.get(key, { type: 'json' })) as CommandState | null;
 
+  let state: CommandState;
   if (!existing || isExpired(existing)) {
     if (existing) await store.delete(key);
-    const empty = emptyCommandState();
-    return jsonResponse(200, {
-      entries: [],
-      createdAt: empty.createdAt,
-      updatedAt: empty.updatedAt,
+    state = emptyCommandState();
+  } else {
+    state = existing;
+  }
+
+  const etag = etagFor(state);
+  const ifNoneMatch = req.headers.get('if-none-match');
+  const isNotModified =
+    ifNoneMatch?.split(',').some((candidate) => candidate.trim() === etag) ?? false;
+
+  if (isNotModified) {
+    return new Response(null, {
+      status: 304,
+      headers: corsHeaders({ etag }),
     });
   }
 
-  return jsonResponse(200, {
-    entries: existing.entries.map((entry) => ({
-      id: entry.id,
-      at: entry.at,
-      shell: entry.shell,
-      script: entry.script,
-    })),
-    createdAt: existing.createdAt,
-    updatedAt: existing.updatedAt,
-  });
+  return jsonResponse(200, serializeCommandState(state), { etag });
 };
 
 export const config = { path: '/api/cmd-read' };

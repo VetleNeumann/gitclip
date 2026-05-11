@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   appendCommandEntry,
+  clearCommandEntries,
+  dismissCommandEntryById,
+  etagFor,
   emptyCommandState,
   MAX_TOTAL_BYTES,
   MAX_WRITE_BYTES,
@@ -80,6 +83,28 @@ describe('command state helpers', () => {
     trimCommandToCap(state, 2);
     expect(state.entries.map((entry) => entry.id)).toEqual(['b', 'c']);
   });
+
+  it('etagFor stays stable on no-op and changes across write/dismiss/clear', () => {
+    const state = emptyCommandState(1000);
+
+    const initial = etagFor(state);
+    expect(etagFor(state)).toBe(initial);
+
+    const first = appendCommandEntry(state, { shell: 'bash', script: 'echo one' }, 1100);
+    const afterWrite = etagFor(state);
+    expect(afterWrite).not.toBe(initial);
+
+    const dismissed = dismissCommandEntryById(state, first.id, 1200);
+    expect(dismissed).toBe(true);
+    const afterDismiss = etagFor(state);
+    expect(afterDismiss).not.toBe(afterWrite);
+
+    appendCommandEntry(state, { shell: 'pwsh', script: 'Get-Date' }, 1300);
+    const beforeClear = etagFor(state);
+    clearCommandEntries(state, 1400);
+    expect(state.entries).toEqual([]);
+    expect(etagFor(state)).not.toBe(beforeClear);
+  });
 });
 
 describe('cmd-write', () => {
@@ -130,9 +155,11 @@ describe('cmd-read', () => {
     await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo second'), enc: 'b64', shell: 'pwsh' }));
 
     const r1 = await readHandler(req('GET', '/api/cmd-read'));
+    expect(r1.headers.get('etag')).toBeTruthy();
     const body1 = (await r1.json()) as { entries: { shell: string; script: string }[] };
 
     const r2 = await readHandler(req('GET', '/api/cmd-read'));
+    expect(r2.headers.get('etag')).toBeTruthy();
     const body2 = (await r2.json()) as { entries: { shell: string; script: string }[] };
 
     expect(body1.entries).toEqual([
@@ -140,6 +167,28 @@ describe('cmd-read', () => {
       { shell: 'pwsh', script: 'echo second', id: expect.any(String), at: expect.any(Number) },
     ]);
     expect(body2.entries).toEqual(body1.entries);
+  });
+
+  it('returns 304 with no body on matching If-None-Match', async () => {
+    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo first'), enc: 'b64', shell: 'bash' }));
+
+    const firstRead = await readHandler(req('GET', '/api/cmd-read'));
+    expect(firstRead.status).toBe(200);
+    const etag = firstRead.headers.get('etag');
+    expect(etag).toBeTruthy();
+
+    const secondRead = await readHandler(
+      new Request('http://x/api/cmd-read', {
+        method: 'GET',
+        headers: {
+          authorization: `Bearer ${SESSION}`,
+          'if-none-match': etag!,
+        },
+      }),
+    );
+    expect(secondRead.status).toBe(304);
+    expect(secondRead.headers.get('etag')).toBe(etag);
+    expect(await secondRead.text()).toBe('');
   });
 
   it('treats stale queue data as expired', async () => {

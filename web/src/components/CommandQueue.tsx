@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { dismissCommandEntry, readCommandQueue, type CommandEntry } from '../lib/commandQueue';
 
 const POLL_MS = 5_000;
@@ -17,16 +17,19 @@ export function CommandQueue({ sessionId }: Props) {
   const [status, setStatus] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [dismissingId, setDismissingId] = useState<string | null>(null);
+  const etagRef = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    etagRef.current = null;
 
     const tick = async (showBusy: boolean) => {
       if (showBusy) setBusy(true);
       try {
-        const state = await readCommandQueue(sessionId);
+        const result = await readCommandQueue(sessionId, etagRef.current);
         if (!cancelled) {
-          setEntries(state.entries);
+          if (result.etag) etagRef.current = result.etag;
+          if (result.state) setEntries(result.state.entries);
           setStatus(null);
         }
       } catch (err) {

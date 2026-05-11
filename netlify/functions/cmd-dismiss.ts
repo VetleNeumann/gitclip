@@ -1,26 +1,15 @@
 import {
   bufferStore,
+  dismissCommandEntryById,
   isExpired,
   jsonResponse,
   readSession,
+  serializeCommandState,
   UUID_RE,
   type CommandState,
 } from './_lib.js';
 
 const CMD_SUFFIX = ':cmd';
-
-function serialize(state: CommandState) {
-  return {
-    entries: state.entries.map((entry) => ({
-      id: entry.id,
-      at: entry.at,
-      shell: entry.shell,
-      script: entry.script,
-    })),
-    createdAt: state.createdAt,
-    updatedAt: state.updatedAt,
-  };
-}
 
 export default async (req: Request): Promise<Response> => {
   if (req.method === 'OPTIONS') return jsonResponse(204, null);
@@ -43,15 +32,10 @@ export default async (req: Request): Promise<Response> => {
     return jsonResponse(404, { error: 'command id not found' });
   }
 
-  const idx = existing.entries.findIndex((entry) => entry.id === id);
-  if (idx < 0) return jsonResponse(404, { error: 'command id not found' });
-
-  existing.entries.splice(idx, 1);
-  const now = Date.now();
-  existing.updatedAt = now > existing.updatedAt ? now : existing.updatedAt + 1;
+  if (!dismissCommandEntryById(existing, id)) return jsonResponse(404, { error: 'command id not found' });
   await store.setJSON(key, existing);
 
-  return jsonResponse(200, serialize(existing));
+  return jsonResponse(200, serializeCommandState(existing));
 };
 
 export const config = { path: '/api/cmd-dismiss' };

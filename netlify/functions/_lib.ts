@@ -30,15 +30,21 @@ export interface CommandState {
 export const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+export function corsHeaders(extraHeaders: Record<string, string> = {}): Record<string, string> {
+  return {
+    'access-control-allow-origin': '*',
+    'access-control-allow-headers': 'authorization,content-type',
+    'access-control-allow-methods': 'GET,POST,DELETE,OPTIONS',
+    ...extraHeaders,
+  };
+}
+
 export function jsonResponse(status: number, body: unknown, extraHeaders: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: {
       'content-type': 'application/json',
-      'access-control-allow-origin': '*',
-      'access-control-allow-headers': 'authorization,content-type',
-      'access-control-allow-methods': 'GET,POST,DELETE,OPTIONS',
-      ...extraHeaders,
+      ...corsHeaders(extraHeaders),
     },
   });
 }
@@ -89,8 +95,43 @@ export function appendCommandEntry(
     script: input.script,
   };
   state.entries.push(entry);
-  state.updatedAt = now;
+  bumpUpdatedAt(state, now);
   return entry;
+}
+
+export function dismissCommandEntryById(state: CommandState, id: string, now = Date.now()): boolean {
+  const idx = state.entries.findIndex((entry) => entry.id === id);
+  if (idx < 0) return false;
+  state.entries.splice(idx, 1);
+  bumpUpdatedAt(state, now);
+  return true;
+}
+
+export function clearCommandEntries(state: CommandState, now = Date.now()): void {
+  if (state.entries.length === 0) return;
+  state.entries = [];
+  bumpUpdatedAt(state, now);
+}
+
+export function etagFor(state: Pick<CommandState, 'updatedAt' | 'entries'>): string {
+  return `W/"${state.updatedAt}-${state.entries.length}"`;
+}
+
+export function serializeCommandState(state: CommandState) {
+  return {
+    entries: state.entries.map((entry) => ({
+      id: entry.id,
+      at: entry.at,
+      shell: entry.shell,
+      script: entry.script,
+    })),
+    createdAt: state.createdAt,
+    updatedAt: state.updatedAt,
+  };
+}
+
+export function bumpUpdatedAt(state: { updatedAt: number }, now = Date.now()): void {
+  state.updatedAt = now > state.updatedAt ? now : state.updatedAt + 1;
 }
 
 export function isCommandShell(value: unknown): value is CommandShell {
