@@ -3,6 +3,7 @@ import { join } from 'node:path';
 
 export const SHELL_FLAVORS = ['bash', 'pwsh'] as const;
 export type ShellFlavor = (typeof SHELL_FLAVORS)[number];
+const SHELL_FLAVOR_SET = new Set<string>(SHELL_FLAVORS);
 
 interface ResolveShellFlavorInput {
   shell?: string;
@@ -11,6 +12,10 @@ interface ResolveShellFlavorInput {
 }
 
 const ALLOWED = SHELL_FLAVORS.join(', ');
+
+function isShellFlavor(value: string): value is ShellFlavor {
+  return SHELL_FLAVOR_SET.has(value);
+}
 
 function shellConfigPaths(env: NodeJS.ProcessEnv): string[] {
   const paths: string[] = [];
@@ -29,7 +34,7 @@ function shellConfigPaths(env: NodeJS.ProcessEnv): string[] {
 
 function parseShell(source: string, value: string): ShellFlavor {
   const trimmed = value.trim();
-  if (trimmed === 'bash' || trimmed === 'pwsh') return trimmed;
+  if (isShellFlavor(trimmed)) return trimmed;
   throw new Error(
     `gitclip-mcp: invalid shell flavor from ${source}: "${trimmed}". Allowed values: ${ALLOWED}.`,
   );
@@ -61,4 +66,3 @@ export function resolveShellFlavor(input: ResolveShellFlavorInput): ShellFlavor 
     `gitclip-mcp: no shell flavor configured. Set GITCLIP_SHELL to 'bash' or 'pwsh', or write one of those values to:\n${lines}`,
   );
 }
-
