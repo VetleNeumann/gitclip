@@ -111,10 +111,13 @@ describe('cmd-write', () => {
 
     const read = await readHandler(req('GET', '/api/cmd-read'));
     expect(read.status).toBe(200);
-    const body = (await read.json()) as { entries: { script: string }[]; totalBytes: number };
+    const body = (await read.json()) as { entries: { id: string; script: string }[] };
     expect(body.entries).toHaveLength(4);
     expect(body.entries[0]!.script.startsWith('1:')).toBe(true);
     expect(body.entries[3]!.script.startsWith('4:')).toBe(true);
+    for (const entry of body.entries) {
+      expect(entry.id).toMatch(UUID_RE);
+    }
     const total = body.entries.reduce((n, entry) => n + entry.script.length, 0);
     expect(total).toBeLessThanOrEqual(MAX_TOTAL_BYTES);
   });
