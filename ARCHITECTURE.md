@@ -8,12 +8,13 @@ The user develops on a normal dev laptop with Claude Code, but the target machin
 
 GitClip turns that channel into something useful by riding *only* on what the airgapped machine already has: a browser, a shell (bash on Linux, PowerShell on Windows), and the coreutils that come with each.
 
-Two distinct workflows fall out of this:
+Three distinct workflows fall out of this:
 
 1. **Commit sync** — getting a new GitHub commit's tree onto the airgapped machine, fully through the browser.
 2. **Log buffer** — getting paste-able context (errors, stack traces) from the airgapped machine back into Claude Code's context on the dev laptop.
+3. **Command queue** — getting runnable shell commands *from* Claude Code on the dev laptop *to* the airgapped browser, where the user copies and runs them. The mirror image of the log buffer.
 
-These two workflows share nothing except the deployment target, but co-locating them keeps the "set up GitClip once, get both" story simple.
+These workflows share nothing except the deployment target and the session UUID, but co-locating them keeps the "set up GitClip once, get all three" story simple.
 
 ## System diagram
 
@@ -65,8 +66,8 @@ These two workflows share nothing except the deployment target, but co-locating 
 | Path | Role |
 |---|---|
 | `web/` | Vite + React + TS SPA. The only piece the airgapped browser ever loads. |
-| `netlify/functions/` | Three Netlify Functions backed by Netlify Blobs: `buffer-write`, `buffer-read` (read-and-clear, atomic), `buffer-clear`. |
-| `mcp/` | `gitclip-mcp` — stdio MCP server that the dev laptop's Claude Code spawns. The only piece on the *trusted* side of the airgap. |
+| `netlify/functions/` | Netlify Functions backed by Netlify Blobs. Log-buffer side: `buffer-write`, `buffer-read` (read-and-clear, atomic), `buffer-clear`. Command-queue side: `cmd-write`, `cmd-read` (non-destructive, ETag-conditional), `cmd-dismiss` (per-entry), `cmd-clear-all`. |
+| `mcp/` | `gitclip-mcp` — stdio MCP server that the dev laptop's Claude Code spawns. The only piece on the *trusted* side of the airgap. Exposes `read_buffer`, `clear_buffer`, `send_command`, `list_pending_commands`. |
 | `netlify.toml` | Build & functions config. SPA builds from `web/`, functions bundle from `netlify/functions/`. |
 | `package.json` (root) | npm workspaces declaration. Each layer is a workspace; the root is purely orchestration. |
 
@@ -92,6 +93,27 @@ The non-obvious bit: **every file (text or binary) is encoded as base64**, not a
 3. The Function appends to a list stored as JSON in Netlify Blobs at key `<session>`. Caps: 256 KB per write, 1 MB per session (oldest entries trimmed FIFO), 24h since `createdAt`.
 4. On the dev laptop, `gitclip-mcp` reads the session id from (in priority order) `GITCLIP_SESSION` env var → `$GITCLIP_SESSION_FILE` → `$XDG_CONFIG_HOME/gitclip/session` → `$HOME/.config/gitclip/session`. The session is re-read on every tool call, so rotating doesn't require restarting Claude Code.
 5. When Claude calls `read_buffer`, the MCP `GET`s `/api/buffer-read` with the same bearer. The Function reads the entries, then `delete`s the key. The MCP returns the entries as `text` content; Claude's context now contains the logs.
+
+### Command-queue flow
+
+The mirror direction: Claude on the dev laptop pushes shell commands the user runs on the airgapped box.
+
+1. Claude calls the `send_command` MCP tool with `{ script, shell? }`. The MCP picks the shell flavor in this priority order: per-call `shell` arg → `GITCLIP_SHELL` env var → `$XDG_CONFIG_HOME/gitclip/shell` (or `$HOME/.config/gitclip/shell`). If none is set and no per-call arg was given, the call errors.
+2. The MCP `POST`s `/api/cmd-write` with the same `Bearer <session>` it uses for log reads, and a body of `{ content: <b64-of-script>, enc: 'b64', shell }`. Base64 reuses the WAF-dodge path already proven for `buffer-write`.
+3. The Function assigns the entry a UUID (`crypto.randomUUID()`), appends `{ id, at, shell, script }` to the JSON list stored at `<session>:cmd` in the same `gitclip-buffers` Blob store, applies the same caps (256 KB / write, 1 MB / queue, 24 h TTL from `createdAt`), and returns `{ ok, id, pendingCount, totalBytes }`.
+4. The SPA polls `GET /api/cmd-read` every 5 s with `Authorization: Bearer <session>` and `If-None-Match: W/"<updatedAt>-<n>"`. A 304 short-circuits; a 200 returns the full entry list plus the new ETag.
+5. The "Commands from Claude" section in the SPA renders each entry as `timestamp · shell label · <pre><code>script</code></pre> · copy · dismiss`. The header shows a green dot and a `(N pending)` count when entries are present. A "clear all" link sits next to the count.
+6. The user clicks **copy** → script lands on the clipboard, the entry gains a persistent "copied" badge stored in component state. Clicks **dismiss** → SPA fires `DELETE /api/cmd-dismiss?id=<uuid>`; the Function rewrites the list without that entry and bumps `updatedAt`.
+7. Clicks **clear all** → SPA fires `DELETE /api/cmd-clear-all`; the Function `delete`s the `<session>:cmd` key entirely.
+8. Two extra MCP tools complement `send_command`:
+   - `list_pending_commands` — read-only peek so Claude can warn when the user is falling behind ("you have 3 unrun commands still pending"). Does not mutate state.
+   - There is deliberately **no** clear-from-MCP. Only the user — the side with the full execution context — can dismiss.
+
+The non-obvious bit: **the log buffer and the command queue share a session UUID but live in two distinct Blob keys** (`<session>` and `<session>:cmd`). This keeps the setup story one-step (one id in one file) while giving each direction independent size caps, independent ETags, and independent clear semantics. See ADR-0002.
+
+### Why the two directions don't share semantics
+
+The log buffer reads atomically clear; the command queue reads don't. The asymmetry is deliberate (ADR-0001): Claude is a single, idempotent consumer of logs ("I have them now, they're gone"), but the human at the airgapped browser may copy, paste, retry on failure, and only then mark a command done. Forcing clear-on-read on the command direction would lose commands every time a paste failed.
 
 ### Decoupling session config from Claude Code config
 
@@ -161,7 +183,7 @@ The renderer (`web/src/components/CommitGraph.tsx`) uses each row's `inLanes` an
 - **Multi-host providers**. GitLab/Bitbucket support is intentionally deferred. The provider boundary is `lib/github.ts`; making it pluggable is straightforward but not required for the airgapped-LRM use case the project was built for.
 - **Webhook-based push updates**. Polling is fine for one user; webhooks would require persistent backend state and per-repo webhook configuration on each tracked repo.
 - **Multi-branch tracking on one session**. A session tracks one branch at a time. Switching branches resets the head/anchor state.
-- **Two-way sync**. The buffer is unidirectional (airgapped → dev laptop). Pushing local edits *back* to the airgapped machine is the apply-script flow's domain only.
+- **Two-way *file* sync**. The buffer/queue carry log text and shell scripts only — never working-tree state. Pushing local edits *back* to the airgapped machine is the apply-script flow's domain only.
 - **User accounts / auth providers**. The session UUID is the entire identity model. No login, no email verification, no OAuth.
 
 If any of these become real needs, the current shape doesn't preclude them — but adding them speculatively would compromise the "tiny single-purpose utility" character of the project today.
