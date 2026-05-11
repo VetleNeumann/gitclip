@@ -10,6 +10,7 @@ import { resolveShellFlavor, type ShellFlavor } from './shellFlavor.js';
 
 const DEFAULT_URL = 'https://gitclip-vetle.netlify.app';
 const SESSION_RE = /^[a-zA-Z0-9_-]{16,64}$/;
+const ERROR_BODY_PREVIEW_CHARS = 200;
 
 function defaultSessionPath(): string {
   if (process.env.GITCLIP_SESSION_FILE) return process.env.GITCLIP_SESSION_FILE;
@@ -73,6 +74,14 @@ function getOrigin(): string {
   return (process.env.GITCLIP_URL ?? DEFAULT_URL).replace(/\/+$/, '');
 }
 
+async function throwIfNotOk(res: Response, endpoint: string): Promise<void> {
+  if (res.ok) return;
+  const body = await res.text().catch(() => '');
+  throw new Error(
+    `${endpoint} failed: HTTP ${res.status} ${res.statusText} — ${body.slice(0, ERROR_BODY_PREVIEW_CHARS)}`,
+  );
+}
+
 function formatEntries(resp: BufferResponse): string {
   if (resp.entries.length === 0) return '(buffer empty)';
   const blocks = resp.entries.map((e) => {
@@ -90,10 +99,7 @@ async function readBuffer(): Promise<string> {
     method: 'GET',
     headers: { authorization: `Bearer ${session}` },
   });
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`buffer-read failed: HTTP ${res.status} ${res.statusText} — ${body.slice(0, 200)}`);
-  }
+  await throwIfNotOk(res, 'buffer-read');
   const json = (await res.json()) as BufferResponse;
   return formatEntries(json);
 }
@@ -105,10 +111,7 @@ async function clearBuffer(): Promise<void> {
     method: 'DELETE',
     headers: { authorization: `Bearer ${session}` },
   });
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`buffer-clear failed: HTTP ${res.status} ${res.statusText} — ${body.slice(0, 200)}`);
-  }
+  await throwIfNotOk(res, 'buffer-clear');
 }
 
 async function sendCommand(script: string, shell: ShellFlavor): Promise<CommandWriteResponse> {
@@ -126,10 +129,7 @@ async function sendCommand(script: string, shell: ShellFlavor): Promise<CommandW
       shell,
     }),
   });
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`cmd-write failed: HTTP ${res.status} ${res.statusText} — ${body.slice(0, 200)}`);
-  }
+  await throwIfNotOk(res, 'cmd-write');
   return (await res.json()) as CommandWriteResponse;
 }
 
@@ -140,10 +140,7 @@ async function listPendingCommands(): Promise<string> {
     method: 'GET',
     headers: { authorization: `Bearer ${session}` },
   });
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`cmd-read failed: HTTP ${res.status} ${res.statusText} — ${body.slice(0, 200)}`);
-  }
+  await throwIfNotOk(res, 'cmd-read');
   const json = (await res.json()) as CommandReadResponse;
   return formatPendingCommands(json.entries);
 }
