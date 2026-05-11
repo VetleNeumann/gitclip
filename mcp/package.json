@@ -30,6 +30,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "test": "npm run build && node --test dist/shellFlavor.test.js",
     "start": "node dist/index.js"
   },
   "dependencies": {
