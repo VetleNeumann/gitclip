@@ -9,8 +9,12 @@ export interface StorageLike {
 
 function resolveStorage(storage?: StorageLike): StorageLike | null {
   if (storage) return storage;
-  if (typeof localStorage === 'undefined') return null;
-  return localStorage;
+  try {
+    if (typeof localStorage === 'undefined') return null;
+    return localStorage;
+  } catch {
+    return null;
+  }
 }
 
 export function copiedCommandKey(id: string): string {

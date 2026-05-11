@@ -54,4 +54,28 @@ describe('commandCopied persistence', () => {
     expect(wasCommandCopied('entry-1')).toBe(false);
     expect([...listCopiedCommandIds(['entry-1'])]).toEqual([]);
   });
+
+  it('gracefully behaves when localStorage access throws', () => {
+    const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      get() {
+        throw new Error('localStorage blocked');
+      },
+    });
+
+    try {
+      expect(wasCommandCopied('entry-1')).toBe(false);
+      expect([...listCopiedCommandIds(['entry-1'])]).toEqual([]);
+      expect(() => markCommandCopied('entry-1')).not.toThrow();
+      expect(() => clearCommandCopied('entry-1')).not.toThrow();
+    } finally {
+      if (originalDescriptor) {
+        Object.defineProperty(globalThis, 'localStorage', originalDescriptor);
+      } else {
+        Reflect.deleteProperty(globalThis, 'localStorage');
+      }
+    }
+  });
 });
