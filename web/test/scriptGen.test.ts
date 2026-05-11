@@ -18,6 +18,16 @@ describe('generateScripts', () => {
     expect(bash).toContain('echo "GitClip: now at abc1234"');
   });
 
+  it('emits a GITCLIP/1 signature line in both flavours', () => {
+    const { bash, powershell } = generateScripts({
+      ops: [{ kind: 'write', path: 'a.txt', content: enc.encode('hi\n') }],
+      targetSha: TARGET,
+      fromSha: FROM,
+    });
+    expect(bash.split('\n')[1]).toBe('# GITCLIP/1');
+    expect(powershell.split('\r\n')[0]).toBe('#!GITCLIP/1');
+  });
+
   it('emits a powershell script with strict mode and CRLF line endings', () => {
     const { powershell } = generateScripts({
       ops: [{ kind: 'write', path: 'a.txt', content: enc.encode('hi\n') }],

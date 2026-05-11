@@ -11,9 +11,24 @@ const TAB_KEY = 'gitclip.shellTab';
 
 const RUNNER_ONELINER = '& ([scriptblock]::Create((Get-Clipboard -Raw)))';
 
+const WRAPPER_BODY = `function gitclip {
+  $c = Get-Clipboard -Raw
+  if ($c -notmatch '\\A\\s*#!GITCLIP/(\\d+)') {
+    throw "gitclip: clipboard is not a GitClip script (no #!GITCLIP marker)"
+  }
+  $v = [int]$Matches[1]
+  if ($v -ne 1) {
+    throw "gitclip: script is v$v, wrapper is v1 — update the gitclip wrapper"
+  }
+  & ([scriptblock]::Create($c))
+}`;
+
 const ALIAS_INSTALL = `New-Item -Path $PROFILE -ItemType File -Force | Out-Null
 if (-not (Select-String -Path $PROFILE -Pattern 'function gitclip' -Quiet)) {
-  Add-Content $PROFILE "\`nfunction gitclip { & ([scriptblock]::Create((Get-Clipboard -Raw))) }"
+  Add-Content $PROFILE @'
+
+${WRAPPER_BODY}
+'@
 }`;
 
 function loadTab(): 'bash' | 'powershell' {
