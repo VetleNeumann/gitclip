@@ -12,12 +12,15 @@
     "dev": "npm --workspace web run dev",
     "build": "npm --workspace web run build",
     "test": "npm --workspace web run test -- --run",
-    "test:watch": "npm --workspace web run test"
+    "test:watch": "npm --workspace web run test",
+    "sandcastle": "npx tsx .sandcastle/main.mts"
   },
   "engines": {
     "node": ">=20"
   },
   "devDependencies": {
-    "netlify-cli": "^25.6.1"
+    "@ai-hero/sandcastle": "^0.5.10",
+    "netlify-cli": "^25.6.1",
+    "tsx": "^4.19.2"
   }
 }

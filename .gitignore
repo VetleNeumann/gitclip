@@ -11,3 +11,4 @@ coverage
 graph-*.png
 prod-graph.png
 *.tsbuildinfo
+.sandcastle/worktrees/

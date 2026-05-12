@@ -1,0 +1,60 @@
+FROM node:22-bookworm
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+  git \
+  curl \
+  jq \
+  ripgrep \
+  ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+# Install GitHub CLI (via the official gpg-signed apt repo)
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+  | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+  | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+  && apt-get update && apt-get install -y gh \
+  && rm -rf /var/lib/apt/lists/*
+
+# Rename the base image's "node" user (UID 1000) to "agent".
+# Keeps UID 1000 so --userns=keep-id (Podman) and --user 1000:1000 (Docker)
+# map to the correct home directory owner.
+RUN usermod -d /home/agent -m -l agent node
+USER agent
+
+# Install Claude Code CLI
+RUN curl -fsSL https://claude.ai/install.sh | bash
+
+# Install OpenAI Codex CLI via agent user's npm prefix (no root needed).
+# `codex` lands in /home/agent/.npm-global/bin.
+RUN mkdir -p /home/agent/.local /home/agent/.npm-global \
+  && npm config set prefix /home/agent/.npm-global \
+  && npm install -g @openai/codex
+
+# Codex defaults to ChatGPT-subscription auth; opt into API-key auth so the
+# OPENAI_API_KEY injected at runtime is actually used.
+RUN mkdir -p /home/agent/.codex \
+  && printf 'preferred_auth_method = "apikey"\n' > /home/agent/.codex/config.toml
+
+# Install just (recipe runner) — handy if a justfile is added later.
+RUN mkdir -p /home/agent/.local/bin \
+  && curl -fsSL https://just.systems/install.sh \
+  | bash -s -- --to /home/agent/.local/bin
+
+# Install actionlint (GitHub Actions workflow linter). Merge-prompt runs it
+# as a preflight before push so a malformed .github/workflows/*.yml can't
+# slip past the merger and break CI for everyone after the next push.
+RUN curl -fsSL \
+  https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash \
+  | bash -s -- latest /home/agent/.local/bin
+
+# Add Claude + local bin + npm-global (codex) to PATH
+ENV PATH="/home/agent/.npm-global/bin:/home/agent/.local/bin:$PATH"
+
+WORKDIR /home/agent
+
+# In worktree sandbox mode, Sandcastle bind-mounts the git worktree at
+# /home/agent/workspace and overrides the working directory to it at
+# container start. Structure so that path can serve as the project root.
+ENTRYPOINT ["sleep", "infinity"]
