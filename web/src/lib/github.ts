@@ -158,17 +158,20 @@ export async function compareCommits(
   };
 }
 
-export async function commitExists(
+export async function resolveCommitSha(
   ref: RepoRef,
   sha: string,
   pat?: string | null,
-): Promise<boolean> {
+): Promise<string | null> {
   const res = await fetch(
     `${API}/repos/${ref.owner}/${ref.repo}/commits/${encodeURIComponent(sha)}`,
     { headers: authHeaders(pat) },
   );
-  if (res.ok) return true;
-  if (res.status === 404 || res.status === 422) return false;
+  if (res.ok) {
+    const data = (await res.json()) as { sha?: string };
+    return data.sha ?? null;
+  }
+  if (res.status === 404 || res.status === 422) return null;
   const body = await res.text().catch(() => '');
   throw new GitHubError(res.status, `${res.status} on commits/${sha} — ${body.slice(0, 200)}`);
 }

@@ -7,7 +7,7 @@ import { CommandQueue } from './components/CommandQueue';
 import { TabBar } from './components/TabBar';
 import { AnchorShaInput } from './components/AnchorShaInput';
 import {
-  commitExists,
+  resolveCommitSha,
   compareCommits,
   getBranchHead,
   getFileContent,
@@ -380,17 +380,20 @@ export default function App() {
     [activeTab],
   );
 
-  const validatePastedAnchor = useCallback(
-    async (sha: string): Promise<string | null> => {
-      if (!activeTab) return 'no active repo';
+  const resolvePastedAnchor = useCallback(
+    async (sha: string): Promise<{ ok: true; sha: string } | { ok: false; reason: string }> => {
+      if (!activeTab) return { ok: false, reason: 'no active repo' };
       try {
-        const exists = await commitExists(activeTab.ref, sha, pat);
-        if (!exists) {
-          return `commit ${sha.slice(0, 7)} not found on ${activeTab.ref.owner}/${activeTab.ref.repo} — wrong repo?`;
+        const fullSha = await resolveCommitSha(activeTab.ref, sha, pat);
+        if (!fullSha) {
+          return {
+            ok: false,
+            reason: `commit ${sha.slice(0, 7)} not found on ${activeTab.ref.owner}/${activeTab.ref.repo} — wrong repo?`,
+          };
         }
-        return null;
+        return { ok: true, sha: fullSha };
       } catch (e) {
-        return e instanceof Error ? e.message : String(e);
+        return { ok: false, reason: e instanceof Error ? e.message : String(e) };
       }
     },
     [activeTab, pat],
@@ -528,10 +531,12 @@ export default function App() {
       let errorMessage = e instanceof Error ? e.message : String(e);
       if (e instanceof GitHubError && e.status === 404) {
         try {
-          const [anchorOk, headOk] = await Promise.all([
-            commitExists(ref, anchorSha, pat),
-            commitExists(ref, headSha, pat),
+          const [anchorResolved, headResolved] = await Promise.all([
+            resolveCommitSha(ref, anchorSha, pat),
+            resolveCommitSha(ref, headSha, pat),
           ]);
+          const anchorOk = anchorResolved !== null;
+          const headOk = headResolved !== null;
           if (!anchorOk && !headOk) {
             errorMessage = `Neither anchor ${anchorSha.slice(0, 7)} nor head ${headSha.slice(0, 7)} exist on ${ref.owner}/${ref.repo}. Branch may have been rewritten or deleted.`;
           } else if (!anchorOk) {
@@ -720,7 +725,7 @@ export default function App() {
                   Click a commit to mark it as your current local state.
                 </div>
               )}
-              <AnchorShaInput onSet={setAnchor} validate={validatePastedAnchor} />
+              <AnchorShaInput onSet={setAnchor} resolve={resolvePastedAnchor} />
             </section>
 
             <div className="space-y-5 min-w-0">

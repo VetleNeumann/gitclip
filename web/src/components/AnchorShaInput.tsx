@@ -3,10 +3,10 @@ import { parseAnchorSha } from '../lib/anchorSha';
 
 interface Props {
   onSet: (sha: string) => void;
-  validate?: (sha: string) => Promise<string | null>;
+  resolve?: (sha: string) => Promise<{ ok: true; sha: string } | { ok: false; reason: string }>;
 }
 
-export function AnchorShaInput({ onSet, validate }: Props) {
+export function AnchorShaInput({ onSet, resolve }: Props) {
   const [value, setValue] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -14,25 +14,27 @@ export function AnchorShaInput({ onSet, validate }: Props) {
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (busy) return;
-    const result = parseAnchorSha(value);
-    if (!result.ok) {
-      setError(result.reason);
+    const parsed = parseAnchorSha(value);
+    if (!parsed.ok) {
+      setError(parsed.reason);
       return;
     }
     setError(null);
-    if (validate) {
+    let finalSha = parsed.sha;
+    if (resolve) {
       setBusy(true);
       try {
-        const reason = await validate(result.sha);
-        if (reason) {
-          setError(reason);
+        const result = await resolve(parsed.sha);
+        if (!result.ok) {
+          setError(result.reason);
           return;
         }
+        finalSha = result.sha;
       } finally {
         setBusy(false);
       }
     }
-    onSet(result.sha);
+    onSet(finalSha);
     setValue('');
   };
 
