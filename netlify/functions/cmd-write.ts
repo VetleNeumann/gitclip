@@ -45,6 +45,8 @@ export default async (req: Request): Promise<Response> => {
     script = payload.content;
   }
 
+  script = script.trim();
+
   if (script.length === 0)
     return jsonResponse(400, { error: 'body.content must be non-empty' });
   if (script.length > MAX_WRITE_BYTES) {

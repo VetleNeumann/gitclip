@@ -12,12 +12,13 @@ export function LogBuffer({ sessionId, onRotate }: Props) {
   const [busy, setBusy] = useState(false);
 
   const send = async () => {
-    if (!text.trim()) return;
+    const trimmed = text.trim();
+    if (!trimmed) return;
     setBusy(true);
     setStatus(null);
     try {
-      await pushToBuffer(sessionId, text);
-      setStatus(`sent ${text.length} chars to the buffer`);
+      await pushToBuffer(sessionId, trimmed);
+      setStatus(`sent ${trimmed.length} chars to the buffer`);
       setText('');
     } catch (err) {
       setStatus(err instanceof Error ? err.message : String(err));
