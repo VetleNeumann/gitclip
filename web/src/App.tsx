@@ -7,11 +7,13 @@ import { CommandQueue } from './components/CommandQueue';
 import { TabBar } from './components/TabBar';
 import { AnchorShaInput } from './components/AnchorShaInput';
 import {
+  commitExists,
   compareCommits,
   getBranchHead,
   getFileContent,
   getMergeBase,
   getRepoMeta,
+  GitHubError,
   listBranches,
   listCommits,
   parseRepoUrl,
@@ -378,6 +380,22 @@ export default function App() {
     [activeTab],
   );
 
+  const validatePastedAnchor = useCallback(
+    async (sha: string): Promise<string | null> => {
+      if (!activeTab) return 'no active repo';
+      try {
+        const exists = await commitExists(activeTab.ref, sha, pat);
+        if (!exists) {
+          return `commit ${sha.slice(0, 7)} not found on ${activeTab.ref.owner}/${activeTab.ref.repo} — wrong repo?`;
+        }
+        return null;
+      } catch (e) {
+        return e instanceof Error ? e.message : String(e);
+      }
+    },
+    [activeTab, pat],
+  );
+
   const jumpToBranch = useCallback(
     async (target: string) => {
       if (!activeTab || target === activeTab.branch) return;
@@ -507,12 +525,30 @@ export default function App() {
         },
       });
     } catch (e) {
+      let errorMessage = e instanceof Error ? e.message : String(e);
+      if (e instanceof GitHubError && e.status === 404) {
+        try {
+          const [anchorOk, headOk] = await Promise.all([
+            commitExists(ref, anchorSha, pat),
+            commitExists(ref, headSha, pat),
+          ]);
+          if (!anchorOk && !headOk) {
+            errorMessage = `Neither anchor ${anchorSha.slice(0, 7)} nor head ${headSha.slice(0, 7)} exist on ${ref.owner}/${ref.repo}. Branch may have been rewritten or deleted.`;
+          } else if (!anchorOk) {
+            errorMessage = `Anchor commit ${anchorSha.slice(0, 7)} is no longer on ${ref.owner}/${ref.repo} (likely force-pushed or rebased away). Pick a newer anchor from the commit list.`;
+          } else if (!headOk) {
+            errorMessage = `Head commit ${headSha.slice(0, 7)} is no longer on ${ref.owner}/${ref.repo}. Refresh the branch to get the current head.`;
+          }
+        } catch {
+          // probe failed; keep original error
+        }
+      }
       dispatch({
         type: 'UPDATE_TAB',
         id: tabId,
         patch: {
           busy: false,
-          error: e instanceof Error ? e.message : String(e),
+          error: errorMessage,
           genStatus: null,
         },
       });
@@ -684,7 +720,7 @@ export default function App() {
                   Click a commit to mark it as your current local state.
                 </div>
               )}
-              <AnchorShaInput onSet={setAnchor} />
+              <AnchorShaInput onSet={setAnchor} validate={validatePastedAnchor} />
             </section>
 
             <div className="space-y-5 min-w-0">

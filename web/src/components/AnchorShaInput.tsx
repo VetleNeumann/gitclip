@@ -3,20 +3,35 @@ import { parseAnchorSha } from '../lib/anchorSha';
 
 interface Props {
   onSet: (sha: string) => void;
+  validate?: (sha: string) => Promise<string | null>;
 }
 
-export function AnchorShaInput({ onSet }: Props) {
+export function AnchorShaInput({ onSet, validate }: Props) {
   const [value, setValue] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
-  const submit = (e: FormEvent) => {
+  const submit = async (e: FormEvent) => {
     e.preventDefault();
+    if (busy) return;
     const result = parseAnchorSha(value);
     if (!result.ok) {
       setError(result.reason);
       return;
     }
     setError(null);
+    if (validate) {
+      setBusy(true);
+      try {
+        const reason = await validate(result.sha);
+        if (reason) {
+          setError(reason);
+          return;
+        }
+      } finally {
+        setBusy(false);
+      }
+    }
     onSet(result.sha);
     setValue('');
   };
@@ -39,12 +54,14 @@ export function AnchorShaInput({ onSet }: Props) {
           }}
           autoComplete="off"
           spellCheck={false}
+          disabled={busy}
         />
         <button
           type="submit"
-          className="px-3 py-1 rounded bg-zinc-800 border border-zinc-700 text-xs hover:bg-zinc-700"
+          className="px-3 py-1 rounded bg-zinc-800 border border-zinc-700 text-xs hover:bg-zinc-700 disabled:opacity-50"
+          disabled={busy}
         >
-          Set
+          {busy ? 'Checking…' : 'Set'}
         </button>
       </div>
       {error && <div className="text-xs text-red-400">{error}</div>}

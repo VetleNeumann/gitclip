@@ -158,6 +158,21 @@ export async function compareCommits(
   };
 }
 
+export async function commitExists(
+  ref: RepoRef,
+  sha: string,
+  pat?: string | null,
+): Promise<boolean> {
+  const res = await fetch(
+    `${API}/repos/${ref.owner}/${ref.repo}/commits/${encodeURIComponent(sha)}`,
+    { headers: authHeaders(pat) },
+  );
+  if (res.ok) return true;
+  if (res.status === 404 || res.status === 422) return false;
+  const body = await res.text().catch(() => '');
+  throw new GitHubError(res.status, `${res.status} on commits/${sha} — ${body.slice(0, 200)}`);
+}
+
 export async function getMergeBase(
   ref: RepoRef,
   base: string,
