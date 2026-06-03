@@ -1,0 +1,9 @@
+# Calibration distinct from canon.
+
+fragments_skipped:
+  - name: uv-sync
+    reason: gitclip is pure-node (no pyproject.toml); python overlay not applicable
+  - name: Containerfile-python
+    reason: same as above — no `uv python install` needed
+
+tunables_overridden: []

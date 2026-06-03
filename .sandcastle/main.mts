@@ -28,13 +28,15 @@ import { execFileSync } from "node:child_process";
 // Configuration
 // ---------------------------------------------------------------------------
 
-// All four phases run on OpenAI's gpt-5.3-codex via the codex CLI inside the
-// sandbox. Auth: OPENAI_API_KEY is read from the host process env and passed
-// into the container by the agent provider's env merge.
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-if (!OPENAI_API_KEY) {
+// SANDCASTLE_AGENT={codex,claude} selects provider per invocation. Codex
+// path uses gpt-5.3-codex high effort across all phases. Claude path uses
+// Opus 4.7 max effort for the planner and Sonnet 4.6 high effort for the
+// volume phases (implementer/reviewer/merger).
+const SANDCASTLE_AGENT =
+  (process.env.SANDCASTLE_AGENT as "codex" | "claude" | undefined) ?? "codex";
+if (SANDCASTLE_AGENT !== "codex" && SANDCASTLE_AGENT !== "claude") {
   throw new Error(
-    "OPENAI_API_KEY is not set on the host. Export it before running sandcastle.",
+    `SANDCASTLE_AGENT must be "codex" or "claude" (got ${SANDCASTLE_AGENT!}).`,
   );
 }
 
@@ -45,11 +47,22 @@ if (!GH_TOKEN) {
   );
 }
 
-const codexAgent = () =>
-  sandcastle.codex("gpt-5.3-codex", {
-    effort: "high",
-    env: { OPENAI_API_KEY, GH_TOKEN },
-  });
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+if (SANDCASTLE_AGENT === "codex" && !OPENAI_API_KEY) {
+  throw new Error(
+    "OPENAI_API_KEY is not set on the host. Export it before running sandcastle with SANDCASTLE_AGENT=codex.",
+  );
+}
+
+const planAgent = () =>
+  SANDCASTLE_AGENT === "claude"
+    ? sandcastle.claudeCode("claude-opus-4-7", { effort: "max" })
+    : sandcastle.codex("gpt-5.3-codex", { effort: "high" });
+
+const workAgent = () =>
+  SANDCASTLE_AGENT === "claude"
+    ? sandcastle.claudeCode("claude-sonnet-4-6", { effort: "high" })
+    : sandcastle.codex("gpt-5.3-codex", { effort: "high" });
 
 // Maximum number of plan→execute→merge cycles before stopping.
 const MAX_ITERATIONS = 10;
@@ -57,25 +70,25 @@ const MAX_ITERATIONS = 10;
 const hostRepoDir = process.cwd();
 
 // Hooks run inside the sandbox before the agent starts each iteration.
-// - npm install: hydrates root + workspaces (web, mcp, netlify/functions)
-//   so vitest / tsc / vite are available on first iteration without paying
-//   the install cost mid-task.
-// - codex login --with-api-key: hands the host's OPENAI_API_KEY to the
-//   codex CLI inside the container.
-// - gh auth login + setup-git: wires GH_TOKEN into both `gh` (for API
-//   calls) and git's credential helper (for `git fetch`/`push` over
-//   HTTPS). Without this, every fetch/push hit "missing GitHub
-//   credentials" and the agents fell back to stale local refs.
-// - force HTTPS origin: bind-mounted worktrees inherit the host's remote
-//   URL, which may be SSH (`git@github.com:…`). The sandbox has no SSH
-//   key + no known_hosts, so SSH push fails with "Host key verification
-//   failed". Rewriting to HTTPS routes the push through the credential
-//   helper above.
+// SANDCASTLE_AGENT is injected into the sandbox env below so in-container
+// `sh -c` can branch on it.
+// - npm install: hydrates root + workspaces (web, mcp, netlify/functions).
+// - codex login: feeds OPENAI_API_KEY to codex CLI; skipped on claude.
+// - claude auth: confirms ~/.claude/.credentials.json bind-mounted in.
+// - gh auth + force HTTPS origin: both providers need gh credentials and
+//   HTTPS push routing through the credential helper.
 const hooks = {
   sandbox: {
     onSandboxReady: [
       { command: "npm install" },
-      { command: "printenv OPENAI_API_KEY | codex login --with-api-key" },
+      {
+        command:
+          'sh -c \'[ "$SANDCASTLE_AGENT" = "claude" ] || printenv OPENAI_API_KEY | codex login --with-api-key\'',
+      },
+      {
+        command:
+          'sh -c \'[ "$SANDCASTLE_AGENT" = "codex" ] || test -f "$HOME/.claude/.credentials.json" || { echo "claude: ~/.claude/.credentials.json missing inside sandbox; check ro mount" >&2; exit 1; }\'',
+      },
       {
         command:
           'sh -c \'T="$GH_TOKEN"; unset GH_TOKEN; printf %s "$T" | gh auth login --with-token\'',
@@ -90,11 +103,31 @@ const hooks = {
   },
 };
 
+// Mount the host's OAuth credentials file (only) into the sandbox when the
+// claude provider is active. Whole-dir ro mount blocks claude from writing
+// session JSONL under ~/.claude/projects/ and trips session-capture.
+const claudeMount =
+  SANDCASTLE_AGENT === "claude"
+    ? [
+        {
+          hostPath: "~/.claude/.credentials.json",
+          sandboxPath: "~/.claude/.credentials.json",
+          readonly: true,
+        },
+      ]
+    : [];
+
+const sandboxEnv: Record<string, string> = {
+  SANDCASTLE_AGENT,
+  GH_TOKEN,
+};
+if (SANDCASTLE_AGENT === "codex") {
+  sandboxEnv.OPENAI_API_KEY = OPENAI_API_KEY!;
+}
+
 const worktreeSandbox = podman({
-  env: {
-    OPENAI_API_KEY,
-    GH_TOKEN,
-  },
+  mounts: claudeMount,
+  env: sandboxEnv,
 });
 
 // ---------------------------------------------------------------------------
@@ -113,10 +146,10 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
   // -------------------------------------------------------------------------
   const plan = await sandcastle.run({
     hooks,
-    sandbox: podman(),
+    sandbox: podman({ mounts: claudeMount, env: sandboxEnv }),
     name: "planner",
     maxIterations: 1,
-    agent: codexAgent(),
+    agent: planAgent(),
     promptFile: "./.sandcastle/plan-prompt.md",
   });
 
@@ -164,7 +197,7 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
         const implement = await sandbox.run({
           name: "implementer",
           maxIterations: 100,
-          agent: codexAgent(),
+          agent: workAgent(),
           promptFile: "./.sandcastle/implement-prompt.md",
           promptArgs: {
             TASK_ID: issue.id,
@@ -180,7 +213,7 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
             // (read diff, maybe one fast verification, one commit) without
             // enabling deep rabbit-holes — the prompt pins scope.
             maxIterations: 5,
-            agent: codexAgent(),
+            agent: workAgent(),
             promptFile: "./.sandcastle/review-prompt.md",
             promptArgs: {
               BRANCH: issue.branch,
@@ -275,10 +308,10 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
   // -------------------------------------------------------------------------
   await sandcastle.run({
     hooks,
-    sandbox: podman(),
+    sandbox: podman({ mounts: claudeMount, env: sandboxEnv }),
     name: "merger",
     maxIterations: 1,
-    agent: codexAgent(),
+    agent: workAgent(),
     promptFile: "./.sandcastle/merge-prompt.md",
     promptArgs: {
       BRANCHES: completedBranches.map((b) => `- ${b}`).join("\n"),

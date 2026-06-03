@@ -10,10 +10,38 @@ Branches to merge (in order):
 
 # WORKING-TREE PRECONDITION
 
-If `git status` shows uncommitted changes you didn't make, **stash them
-first** with `git stash push -u -m sandcastle-merger-pre-merge`, finish the
-entire merge / push / cleanup flow, then `git stash pop` at the very end.
-Do **not** ask the user what to do — stashing is the standing instruction.
+If `git status` shows uncommitted changes you didn't make:
+
+1. **Pre-empt untracked/merge collisions.** Any **untracked** local file
+   whose path is tracked on a branch in the merge list will collide
+   when the merge brings that path in, and `git stash pop` later will
+   refuse to restore an untracked entry over the now-tracked file.
+   Rename each colliding path to `<path>.local` first so the local
+   copy survives as an untracked sibling:
+
+   ```
+   # Substitute the branches from the list above (one per `for` arg).
+   merge_paths=$(for b in <branch-1> <branch-2> ...; do
+     git ls-tree -r --name-only "$b"
+   done | sort -u)
+   for f in $(git ls-files --others --exclude-standard); do
+     if printf '%s\n' "$merge_paths" | grep -qFx "$f"; then
+       mv "$f" "$f.local"
+     fi
+   done
+   ```
+
+2. **Then stash everything else:**
+
+   ```
+   git stash push -u -m sandcastle-merger-pre-merge
+   ```
+
+3. Finish merge / push / cleanup, then `git stash pop` at the very end.
+
+Do **not** ask the user — stashing is the standing instruction. Report
+any `<path>.local` files in the final summary so the user knows where
+their work was parked.
 
 # REMOTE SYNC PRECONDITION — REQUIRED
 
@@ -56,6 +84,30 @@ For each branch above, in order:
 4. If tests or builds fail: investigate, fix forward on `main` with a
    small follow-up commit (Conventional Commits format), and re-run.
    Do not abort the merge sequence; keep going through the list.
+
+# FIX-FORWARD POLICY — REQUIRED
+
+You may fix forward on `main` only when the failure is caused by the
+merged code itself or by something this run is responsible for:
+
+- test failures caused by the merge
+- malformed workflow YAML (see WORKFLOW PREFLIGHT)
+- conflict resolutions you chose
+
+You may **not** fix forward to paper over **environment** failures:
+
+- missing host tooling (`podman: command not found`, no `docker`,
+  no `just`, no language toolchain, etc.)
+- absent or invalid secrets / credentials
+- network unreachable
+- broken sandbox / container setup
+
+These are infra problems, not regressions of `main`. Editing
+`test`/`smoke`/`Makefile` targets to skip steps "when the tool is
+missing" is a real product change with real review cost; do **not**
+commit such shims silently from the merger. Instead: stop, leave
+`main` untouched by a shim commit, skip the push for this train, and
+report the environment failure plainly.
 
 # WORKFLOW PREFLIGHT — REQUIRED
 
@@ -153,7 +205,10 @@ If you stashed pre-merge changes at the top, finish with:
 git stash pop
 ```
 
-If the pop conflicts, leave the stash in place and report.
+If the pop conflicts, leave the stash in place and report. (The
+WORKING-TREE PRECONDITION step above pre-empts the common
+untracked-vs-now-tracked case; any conflict that still gets here is a
+genuine overlap and needs the user.)
 
 # DONE
 
