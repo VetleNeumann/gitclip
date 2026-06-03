@@ -155,7 +155,7 @@ async function main(): Promise<void> {
     { name: 'gitclip', version: '0.1.0' },
     {
       instructions:
-        'Use read_buffer to drain logs/error output from the GitClip web UI, clear_buffer to drop pending logs, send_command to queue a script for the user to copy on the airgapped browser, and list_pending_commands to peek at queued commands without clearing.',
+        "Use read_buffer to drain logs/error output from the GitClip web UI, clear_buffer to drop pending logs, send_command to queue a payload for the user to copy on the airgapped browser (a shell script by default, or kind:'snippet' for nvim/SQL/text they paste rather than run), and list_pending_commands to peek at queued commands without clearing.",
     },
   );
 
