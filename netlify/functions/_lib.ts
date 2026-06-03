@@ -12,13 +12,14 @@ export interface BufferState {
   entries: { at: number; text: string }[];
 }
 
-export type CommandShell = 'bash' | 'pwsh';
+export type CommandKind = 'bash' | 'pwsh' | 'snippet';
 
 export interface CommandEntry {
   id: string;
   at: number;
-  shell: CommandShell;
+  kind: CommandKind;
   script: string;
+  hint?: string;
 }
 
 export interface CommandState {
@@ -85,15 +86,16 @@ export function trimCommandToCap(state: CommandState, cap: number): void {
 
 export function appendCommandEntry(
   state: CommandState,
-  input: { shell: CommandShell; script: string },
+  input: { kind: CommandKind; script: string; hint?: string },
   now = Date.now(),
 ): CommandEntry {
   const entry: CommandEntry = {
     id: randomUUID(),
     at: now,
-    shell: input.shell,
+    kind: input.kind,
     script: input.script,
   };
+  if (input.kind === 'snippet' && input.hint !== undefined) entry.hint = input.hint;
   state.entries.push(entry);
   bumpUpdatedAt(state, now);
   return entry;
@@ -119,12 +121,16 @@ export function etagFor(state: Pick<CommandState, 'updatedAt' | 'entries'>): str
 
 export function serializeCommandState(state: CommandState) {
   return {
-    entries: state.entries.map((entry) => ({
-      id: entry.id,
-      at: entry.at,
-      shell: entry.shell,
-      script: entry.script,
-    })),
+    entries: state.entries.map((entry) => {
+      const out: { id: string; at: number; kind: CommandKind; script: string; hint?: string } = {
+        id: entry.id,
+        at: entry.at,
+        kind: entry.kind,
+        script: entry.script,
+      };
+      if (entry.hint !== undefined) out.hint = entry.hint;
+      return out;
+    }),
     createdAt: state.createdAt,
     updatedAt: state.updatedAt,
   };
@@ -134,12 +140,18 @@ export function bumpUpdatedAt(state: { updatedAt: number }, now = Date.now()): v
   state.updatedAt = now > state.updatedAt ? now : state.updatedAt + 1;
 }
 
-export function isCommandShell(value: unknown): value is CommandShell {
-  return value === 'bash' || value === 'pwsh';
+export function isCommandKind(value: unknown): value is CommandKind {
+  return value === 'bash' || value === 'pwsh' || value === 'snippet';
 }
 
 export function isExpired(state: { createdAt: number }, now = Date.now()): boolean {
   return now - state.createdAt > SESSION_TTL_MS;
+}
+
+// Pre-deploy entries carried a `shell` field and no `kind`. We wipe rather than
+// migrate them — the queue is ephemeral (24h TTL) and a deploy clearing it is fine.
+export function isLegacyCommandState(state: CommandState): boolean {
+  return state.entries.some((entry) => !isCommandKind((entry as { kind?: unknown }).kind));
 }
 
 export function emptyState(now = Date.now()): BufferState {

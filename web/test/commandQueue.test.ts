@@ -1,5 +1,24 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { readCommandQueue } from '../src/lib/commandQueue';
+import { commandEntryLabel, readCommandQueue, type CommandEntry } from '../src/lib/commandQueue';
+
+function entry(partial: Partial<CommandEntry>): CommandEntry {
+  return { id: 'x', at: 0, kind: 'bash', script: '', ...partial };
+}
+
+describe('commandEntryLabel', () => {
+  it('shows the bare kind for shell commands', () => {
+    expect(commandEntryLabel(entry({ kind: 'bash' }))).toBe('bash');
+    expect(commandEntryLabel(entry({ kind: 'pwsh' }))).toBe('pwsh');
+  });
+
+  it('appends the hint for snippets', () => {
+    expect(commandEntryLabel(entry({ kind: 'snippet', hint: 'psql query' }))).toBe('snippet · psql query');
+  });
+
+  it('shows bare snippet when no hint', () => {
+    expect(commandEntryLabel(entry({ kind: 'snippet' }))).toBe('snippet');
+  });
+});
 
 describe('readCommandQueue', () => {
   afterEach(() => {

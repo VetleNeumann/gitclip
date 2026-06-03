@@ -2,7 +2,7 @@ import {
   appendCommandEntry,
   bufferStore,
   emptyCommandState,
-  isCommandShell,
+  isCommandKind,
   isExpired,
   jsonResponse,
   MAX_TOTAL_BYTES,
@@ -22,17 +22,19 @@ export default async (req: Request): Promise<Response> => {
   const session = readSession(req);
   if (session instanceof Response) return session;
 
-  let payload: { content?: unknown; enc?: unknown; shell?: unknown };
+  let payload: { content?: unknown; enc?: unknown; kind?: unknown; hint?: unknown };
   try {
-    payload = (await req.json()) as { content?: unknown; enc?: unknown; shell?: unknown };
+    payload = (await req.json()) as { content?: unknown; enc?: unknown; kind?: unknown; hint?: unknown };
   } catch {
     return jsonResponse(400, { error: 'invalid JSON body' });
   }
 
   if (typeof payload.content !== 'string')
     return jsonResponse(400, { error: 'body.content must be a string' });
-  if (!isCommandShell(payload.shell))
-    return jsonResponse(400, { error: "body.shell must be 'bash' or 'pwsh'" });
+  if (!isCommandKind(payload.kind))
+    return jsonResponse(400, { error: "body.kind must be 'bash', 'pwsh', or 'snippet'" });
+  if (payload.hint !== undefined && typeof payload.hint !== 'string')
+    return jsonResponse(400, { error: 'body.hint must be a string' });
 
   let script: string;
   if (payload.enc === 'b64') {
@@ -62,7 +64,8 @@ export default async (req: Request): Promise<Response> => {
   const now = Date.now();
   const state = !existing || isExpired(existing, now) ? emptyCommandState(now) : existing;
 
-  const entry = appendCommandEntry(state, { shell: payload.shell, script }, now);
+  const hint = payload.kind === 'snippet' ? (payload.hint as string | undefined) : undefined;
+  const entry = appendCommandEntry(state, { kind: payload.kind, script, hint }, now);
   trimCommandToCap(state, MAX_TOTAL_BYTES);
   await store.setJSON(key, state);
 

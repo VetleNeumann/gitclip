@@ -61,8 +61,8 @@ beforeEach(() => {
 describe('command state helpers', () => {
   it('appends command entries with UUID ids and tracks totals', () => {
     const state = emptyCommandState(1000);
-    const first = appendCommandEntry(state, { shell: 'bash', script: 'echo one' }, 1100);
-    const second = appendCommandEntry(state, { shell: 'pwsh', script: 'Get-Process' }, 1200);
+    const first = appendCommandEntry(state, { kind: 'bash', script: 'echo one' }, 1100);
+    const second = appendCommandEntry(state, { kind: 'pwsh', script: 'Get-Process' }, 1200);
 
     expect(first.id).toMatch(UUID_RE);
     expect(second.id).toMatch(UUID_RE);
@@ -71,14 +71,28 @@ describe('command state helpers', () => {
     expect(totalCommandBytes(state)).toBe('echo one'.length + 'Get-Process'.length);
   });
 
+  it('persists a snippet kind with its hint', () => {
+    const state = emptyCommandState(1000);
+    const entry = appendCommandEntry(
+      state,
+      { kind: 'snippet', script: 'SELECT 1;', hint: 'psql query' },
+      1100,
+    );
+
+    expect(entry.kind).toBe('snippet');
+    expect(entry.hint).toBe('psql query');
+    expect(entry.script).toBe('SELECT 1;');
+    expect(state.entries[0]).toBe(entry);
+  });
+
   it('trims FIFO when over the cap', () => {
     const state: CommandState = {
       createdAt: 0,
       updatedAt: 0,
       entries: [
-        { id: 'a', at: 1, shell: 'bash', script: 'A' },
-        { id: 'b', at: 2, shell: 'bash', script: 'B' },
-        { id: 'c', at: 3, shell: 'bash', script: 'C' },
+        { id: 'a', at: 1, kind: 'bash', script: 'A' },
+        { id: 'b', at: 2, kind: 'bash', script: 'B' },
+        { id: 'c', at: 3, kind: 'bash', script: 'C' },
       ],
     };
     trimCommandToCap(state, 2);
@@ -91,7 +105,7 @@ describe('command state helpers', () => {
     const initial = etagFor(state);
     expect(etagFor(state)).toBe(initial);
 
-    const first = appendCommandEntry(state, { shell: 'bash', script: 'echo one' }, 1100);
+    const first = appendCommandEntry(state, { kind: 'bash', script: 'echo one' }, 1100);
     const afterWrite = etagFor(state);
     expect(afterWrite).not.toBe(initial);
 
@@ -100,7 +114,7 @@ describe('command state helpers', () => {
     const afterDismiss = etagFor(state);
     expect(afterDismiss).not.toBe(afterWrite);
 
-    appendCommandEntry(state, { shell: 'pwsh', script: 'Get-Date' }, 1300);
+    appendCommandEntry(state, { kind: 'pwsh', script: 'Get-Date' }, 1300);
     const beforeClear = etagFor(state);
     clearCommandEntries(state, 1400);
     expect(state.entries).toEqual([]);
@@ -110,19 +124,50 @@ describe('command state helpers', () => {
 
 describe('cmd-write', () => {
   it('rejects without bearer', async () => {
-    const r = await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo hi'), enc: 'b64', shell: 'bash' }, null));
+    const r = await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo hi'), enc: 'b64', kind: 'bash' }, null));
     expect(r.status).toBe(401);
   });
 
   it('rejects malformed session', async () => {
-    const r = await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo hi'), enc: 'b64', shell: 'bash' }, 'short'));
+    const r = await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo hi'), enc: 'b64', kind: 'bash' }, 'short'));
     expect(r.status).toBe(400);
   });
 
   it('rejects oversized command payloads', async () => {
     const oversized = 'x'.repeat(MAX_WRITE_BYTES + 1);
-    const r = await writeHandler(req('POST', '/api/cmd-write', { content: toB64(oversized), enc: 'b64', shell: 'bash' }));
+    const r = await writeHandler(req('POST', '/api/cmd-write', { content: toB64(oversized), enc: 'b64', kind: 'bash' }));
     expect(r.status).toBe(413);
+  });
+
+  it('round-trips a snippet entry with its hint through write/read', async () => {
+    const w = await writeHandler(
+      req('POST', '/api/cmd-write', { content: toB64('SELECT 1;'), enc: 'b64', kind: 'snippet', hint: 'psql query' }),
+    );
+    expect(w.status).toBe(200);
+
+    const read = await readHandler(req('GET', '/api/cmd-read'));
+    const body = (await read.json()) as { entries: { kind: string; script: string; hint?: string }[] };
+    expect(body.entries).toHaveLength(1);
+    expect(body.entries[0]!.kind).toBe('snippet');
+    expect(body.entries[0]!.hint).toBe('psql query');
+    expect(body.entries[0]!.script).toBe('SELECT 1;');
+  });
+
+  it('rejects an unknown kind', async () => {
+    const r = await writeHandler(
+      req('POST', '/api/cmd-write', { content: toB64('x'), enc: 'b64', kind: 'lua' }),
+    );
+    expect(r.status).toBe(400);
+  });
+
+  it('drops hint on shell kinds', async () => {
+    await writeHandler(
+      req('POST', '/api/cmd-write', { content: toB64('echo hi'), enc: 'b64', kind: 'bash', hint: 'ignore me' }),
+    );
+    const read = await readHandler(req('GET', '/api/cmd-read'));
+    const body = (await read.json()) as { entries: { kind: string; hint?: string }[] };
+    expect(body.entries[0]!.kind).toBe('bash');
+    expect('hint' in body.entries[0]!).toBe(false);
   });
 
   it('persists UUID entries and enforces FIFO cap', async () => {
@@ -130,7 +175,7 @@ describe('cmd-write', () => {
 
     for (let i = 0; i < 5; i++) {
       const script = `${i}:${'x'.repeat(chunkSize - 2)}`;
-      const r = await writeHandler(req('POST', '/api/cmd-write', { content: toB64(script), enc: 'b64', shell: 'bash' }));
+      const r = await writeHandler(req('POST', '/api/cmd-write', { content: toB64(script), enc: 'b64', kind: 'bash' }));
       expect(r.status).toBe(200);
       const body = (await r.json()) as { id: string };
       expect(body.id).toMatch(UUID_RE);
@@ -152,26 +197,26 @@ describe('cmd-write', () => {
 
 describe('cmd-read', () => {
   it('is non-destructive across repeated reads', async () => {
-    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo first'), enc: 'b64', shell: 'bash' }));
-    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo second'), enc: 'b64', shell: 'pwsh' }));
+    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo first'), enc: 'b64', kind: 'bash' }));
+    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo second'), enc: 'b64', kind: 'pwsh' }));
 
     const r1 = await readHandler(req('GET', '/api/cmd-read'));
     expect(r1.headers.get('etag')).toBeTruthy();
-    const body1 = (await r1.json()) as { entries: { shell: string; script: string }[] };
+    const body1 = (await r1.json()) as { entries: { kind: string; script: string }[] };
 
     const r2 = await readHandler(req('GET', '/api/cmd-read'));
     expect(r2.headers.get('etag')).toBeTruthy();
-    const body2 = (await r2.json()) as { entries: { shell: string; script: string }[] };
+    const body2 = (await r2.json()) as { entries: { kind: string; script: string }[] };
 
     expect(body1.entries).toEqual([
-      { shell: 'bash', script: 'echo first', id: expect.any(String), at: expect.any(Number) },
-      { shell: 'pwsh', script: 'echo second', id: expect.any(String), at: expect.any(Number) },
+      { kind: 'bash', script: 'echo first', id: expect.any(String), at: expect.any(Number) },
+      { kind: 'pwsh', script: 'echo second', id: expect.any(String), at: expect.any(Number) },
     ]);
     expect(body2.entries).toEqual(body1.entries);
   });
 
   it('returns 304 with no body on matching If-None-Match', async () => {
-    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo first'), enc: 'b64', shell: 'bash' }));
+    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo first'), enc: 'b64', kind: 'bash' }));
 
     const firstRead = await readHandler(req('GET', '/api/cmd-read'));
     expect(firstRead.status).toBe(200);
@@ -192,11 +237,25 @@ describe('cmd-read', () => {
     expect(await secondRead.text()).toBe('');
   });
 
+  it('wipes pre-deploy entries that lack a kind field', async () => {
+    const now = Date.now();
+    store.set(`${SESSION}:cmd`, {
+      createdAt: now,
+      updatedAt: now,
+      entries: [{ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', at: now, shell: 'bash', script: 'echo legacy' }],
+    });
+
+    const read = await readHandler(req('GET', '/api/cmd-read'));
+    const body = (await read.json()) as { entries: unknown[] };
+    expect(body.entries).toEqual([]);
+    expect(store.get(`${SESSION}:cmd`)).toBeUndefined();
+  });
+
   it('treats stale queue data as expired', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
 
-    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo stale'), enc: 'b64', shell: 'bash' }));
+    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo stale'), enc: 'b64', kind: 'bash' }));
 
     vi.setSystemTime(SESSION_TTL_MS + 1);
     const read = await readHandler(req('GET', '/api/cmd-read'));
@@ -208,13 +267,13 @@ describe('cmd-read', () => {
 
 describe('cmd-dismiss', () => {
   it('dismisses one entry and keeps siblings intact', async () => {
-    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo first'), enc: 'b64', shell: 'bash' }));
-    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo second'), enc: 'b64', shell: 'pwsh' }));
-    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo third'), enc: 'b64', shell: 'bash' }));
+    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo first'), enc: 'b64', kind: 'bash' }));
+    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo second'), enc: 'b64', kind: 'pwsh' }));
+    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo third'), enc: 'b64', kind: 'bash' }));
 
     const before = await readHandler(req('GET', '/api/cmd-read'));
     const beforeBody = (await before.json()) as {
-      entries: { id: string; at: number; shell: string; script: string }[];
+      entries: { id: string; at: number; kind: string; script: string }[];
       updatedAt: number;
     };
     const [first, second, third] = beforeBody.entries;
@@ -225,7 +284,7 @@ describe('cmd-dismiss', () => {
     const dismissed = await dismissHandler(req('DELETE', `/api/cmd-dismiss?id=${second!.id}`));
     expect(dismissed.status).toBe(200);
     const dismissedBody = (await dismissed.json()) as {
-      entries: { id: string; at: number; shell: string; script: string }[];
+      entries: { id: string; at: number; kind: string; script: string }[];
       updatedAt: number;
     };
     expect(dismissedBody.entries).toEqual([first, third]);
@@ -251,7 +310,7 @@ describe('cmd-dismiss', () => {
   });
 
   it('returns 404 when id is not in queue', async () => {
-    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo hi'), enc: 'b64', shell: 'bash' }));
+    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo hi'), enc: 'b64', kind: 'bash' }));
     const missing = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
     const r = await dismissHandler(req('DELETE', `/api/cmd-dismiss?id=${missing}`));
     expect(r.status).toBe(404);
@@ -262,8 +321,8 @@ describe('cmd-dismiss', () => {
 
 describe('cmd-clear-all', () => {
   it('deletes all entries and cmd-read returns empty', async () => {
-    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo one'), enc: 'b64', shell: 'bash' }));
-    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo two'), enc: 'b64', shell: 'pwsh' }));
+    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo one'), enc: 'b64', kind: 'bash' }));
+    await writeHandler(req('POST', '/api/cmd-write', { content: toB64('echo two'), enc: 'b64', kind: 'pwsh' }));
 
     const cleared = await clearAllHandler(req('DELETE', '/api/cmd-clear-all'));
     expect(cleared.status).toBe(200);

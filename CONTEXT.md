@@ -21,11 +21,11 @@ The airgapped → laptop flow. The user pastes logs / stack traces / errors into
 _Avoid_: outbox, log queue
 
 **Command queue**:
-The laptop → airgapped flow. Claude calls the `send_command` MCP tool with a script; the entry appears in the SPA with a copy button. The user runs it on the airgapped box, then explicitly dismisses it. Non-destructive on read.
+The laptop → airgapped flow. Claude calls the `send_command` MCP tool with a payload; the entry appears in the SPA with a copy button. The user *applies* it on the airgapped box — **runs** it (shell, nvim, psql) or just **pastes** it (file contents into Word) — then explicitly dismisses it. "Apply" spans both: execution is one flavor of where a payload goes. Non-destructive on read.
 _Avoid_: inbox, command buffer, task queue
 
 **Entry**:
-One item in either the log buffer or command queue. Log entries are `{at, text}`; command entries are `{id, at, shell, script}`. Command entries get a server-assigned UUID at write time so per-entry dismiss is unambiguous.
+One item in either the log buffer or command queue. Log entries are `{at, text}`; command entries are `{id, at, kind, script, hint?}`. Command entries get a server-assigned UUID at write time so per-entry dismiss is unambiguous.
 _Avoid_: message, payload
 
 **Dismiss**:
@@ -33,8 +33,12 @@ The explicit user action that removes a single command entry from the queue afte
 _Avoid_: ack, resolve, done, complete
 
 **Shell flavor**:
-Either `bash` or `pwsh`. For apply scripts, both are always generated and the user picks at copy time. For command-queue entries, the flavor is configured once on the laptop (`GITCLIP_SHELL` env or fallback file alongside the session) and travels with every `send_command` call.
+Either `bash` or `pwsh`. For apply scripts, both are always generated and the user picks at copy time. For command-queue entries, the shell flavor lives inside **Kind** (the `bash`/`pwsh` values) and is configured once on the laptop (`GITCLIP_SHELL` env or fallback file alongside the session).
 _Avoid_: shell type, platform
+
+**Kind**:
+The classifier on a command-queue **Entry**, telling the human where the payload goes: `bash | pwsh | snippet`. `bash`/`pwsh` are runnable shell commands whose flavor is resolved from config (per ADR-0003). `snippet` is any inert paste-payload — nvim keystrokes, a SQL query, file text bound for Word — that the system treats as opaque. A snippet may carry an optional free-text **hint** (e.g. `psql query`) that the SPA shows as a sub-label (`snippet · psql query`) so a full queue stays unambiguous; the hint is display-only, never inspected, no syntax highlighting per kind.
+_Avoid_: type, target, category
 
 ## Relationships
 
@@ -56,3 +60,4 @@ _Avoid_: shell type, platform
 
 - "Buffer" was tempting for both directions, but the existing **Log buffer** is destructive-on-read and the new **Command queue** is not — resolved by giving them distinct names and only sharing the word "Entry" for the generic item.
 - "Inbox / outbox" framing was rejected because perspective flips depending on which machine you're standing on. Direction-of-flow names (log buffer = airgapped→laptop, command queue = laptop→airgapped) avoid that.
+- **"Command" as the umbrella is provisional.** Once the queue carries `snippet` Kinds (inert paste-payloads, not run), the noun "command" and the tool name `send_command` overstate execution. The verb was broadened to "apply" as a stopgap, but a better umbrella term covering *both* runnable commands and paste-only payloads is wanted eventually. Not renamed yet — `send_command` / "Command queue" stay until a replacement is chosen.

@@ -4,6 +4,7 @@ import {
   emptyCommandState,
   etagFor,
   isExpired,
+  isLegacyCommandState,
   jsonResponse,
   readSession,
   serializeCommandState,
@@ -25,7 +26,7 @@ export default async (req: Request): Promise<Response> => {
   const existing = (await store.get(key, { type: 'json' })) as CommandState | null;
 
   let state: CommandState;
-  if (!existing || isExpired(existing)) {
+  if (!existing || isExpired(existing) || isLegacyCommandState(existing)) {
     if (existing) await store.delete(key);
     state = emptyCommandState();
   } else {

@@ -1,10 +1,17 @@
-export type CommandShell = 'bash' | 'pwsh';
+export type CommandKind = 'bash' | 'pwsh' | 'snippet';
 
 export interface CommandEntry {
   id: string;
   at: number;
-  shell: CommandShell;
+  kind: CommandKind;
   script: string;
+  hint?: string;
+}
+
+// Shell kinds self-describe; a snippet appends its hint so a full queue stays unambiguous.
+export function commandEntryLabel(entry: CommandEntry): string {
+  if (entry.kind === 'snippet' && entry.hint) return `snippet · ${entry.hint}`;
+  return entry.kind;
 }
 
 export interface CommandQueueResponse {

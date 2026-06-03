@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { formatPendingCommands, formatSendCommandQueuedText } from './commandQueue.js';
-import { resolveShellFlavor, type ShellFlavor } from './shellFlavor.js';
+import { resolveKind, type CommandKind } from './commandKind.js';
 
 const DEFAULT_URL = 'https://gitclip-vetle.netlify.app';
 const SESSION_RE = /^[a-zA-Z0-9_-]{16,64}$/;
@@ -35,7 +35,7 @@ interface BufferResponse {
 }
 
 interface CommandReadResponse {
-  entries: { at: number; shell: ShellFlavor; script: string }[];
+  entries: { at: number; kind: CommandKind; script: string; hint?: string }[];
   createdAt?: number;
   updatedAt?: number;
 }
@@ -114,7 +114,11 @@ async function clearBuffer(): Promise<void> {
   await throwIfNotOk(res, 'buffer-clear');
 }
 
-async function sendCommand(script: string, shell: ShellFlavor): Promise<CommandWriteResponse> {
+async function sendCommand(
+  script: string,
+  kind: CommandKind,
+  hint?: string,
+): Promise<CommandWriteResponse> {
   const session = getSession();
   const url = `${getOrigin()}/api/cmd-write`;
   const res = await fetch(url, {
@@ -126,7 +130,8 @@ async function sendCommand(script: string, shell: ShellFlavor): Promise<CommandW
     body: JSON.stringify({
       content: Buffer.from(script, 'utf8').toString('base64'),
       enc: 'b64',
-      shell,
+      kind,
+      ...(kind === 'snippet' && hint ? { hint } : {}),
     }),
   });
   await throwIfNotOk(res, 'cmd-write');
@@ -177,30 +182,33 @@ async function main(): Promise<void> {
   server.registerTool(
     'send_command',
     {
-      title: 'Send command to GitClip command queue',
+      title: 'Send command or snippet to GitClip command queue',
       description:
-        'Queue a shell command/script in the GitClip command queue for this session. The airgapped browser polls and shows each entry with a copy button.',
+        'Queue a payload in the GitClip command queue for this session; the airgapped browser polls and shows each entry with a copy button. ' +
+        'Omit `kind` for a runnable shell command (the configured shell flavor is used). ' +
+        "Pass `kind: 'snippet'` for anything the user pastes rather than runs in a shell — nvim keystrokes, a SQL query, file text for Word — with an optional `hint` (e.g. 'psql query') shown as a sub-label.",
       inputSchema: z
         .object({
           script: z.string().min(1, 'script must be non-empty'),
-          shell: z.string().optional(),
+          kind: z.enum(['bash', 'pwsh', 'snippet']).optional(),
+          hint: z.string().optional(),
         })
         .shape,
       annotations: { readOnlyHint: false, idempotentHint: false },
     },
-    async ({ script, shell }) => {
+    async ({ script, kind, hint }) => {
       try {
-        const resolvedShell = resolveShellFlavor({
-          shell,
+        const resolvedKind = resolveKind({
+          kind,
           env: process.env,
           read: readTextFile,
         });
-        const result = await sendCommand(script, resolvedShell);
+        const result = await sendCommand(script, resolvedKind, hint);
         return {
           content: [
             {
               type: 'text',
-              text: formatSendCommandQueuedText(resolvedShell, result),
+              text: formatSendCommandQueuedText(resolvedKind, result),
             },
           ],
         };

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   clearCommandQueue,
+  commandEntryLabel,
   dismissCommandEntry,
   readCommandQueue,
   type CommandEntry,
@@ -166,7 +167,7 @@ export function CommandQueue({ sessionId }: Props) {
               <article key={entry.id} className="rounded border border-zinc-800 bg-zinc-950/60 p-3 space-y-2">
                 <div className="flex items-center justify-between gap-3 text-xs text-zinc-400">
                   <span>
-                    {formatAt(entry.at)} · <span className="text-zinc-300">{entry.shell}</span>
+                    {formatAt(entry.at)} · <span className="text-zinc-300">{commandEntryLabel(entry)}</span>
                   </span>
                   <div className="flex items-center gap-2">
                     <button

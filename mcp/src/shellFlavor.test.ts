@@ -109,8 +109,8 @@ test('errors with all writable config locations when unset', () => {
 
 test('formats pending commands as timestamped blocks', () => {
   const text = formatPendingCommands([
-    { at: Date.parse('2026-01-02T03:04:05.000Z'), shell: 'bash', script: 'echo one' },
-    { at: Date.parse('2026-01-02T03:05:06.000Z'), shell: 'pwsh', script: 'Get-Process' },
+    { at: Date.parse('2026-01-02T03:04:05.000Z'), kind: 'bash', script: 'echo one' },
+    { at: Date.parse('2026-01-02T03:05:06.000Z'), kind: 'pwsh', script: 'Get-Process' },
   ]);
 
   assert.equal(
