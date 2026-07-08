@@ -1,13 +1,11 @@
-// Parallel Planner with Review — four-phase orchestration loop
+// Parallel Planner — three-phase orchestration loop
 //
 // Phase 1 (Plan):             A codex agent reads open issues, builds a
 //                             dependency graph, and outputs a <plan> JSON
 //                             listing unblocked issues with branch names.
-// Phase 2 (Execute + Review): Per issue, a sandbox is created via
-//                             createSandbox(). Implementer runs first
-//                             (100 iterations). If it produces commits, a
-//                             reviewer runs in the same sandbox on the same
-//                             branch (5 iterations). All issue pipelines
+// Phase 2 (Execute):          Per issue, a sandbox is created via
+//                             createSandbox(). Implementer runs
+//                             (100 iterations). All issue pipelines
 //                             run concurrently via Promise.allSettled().
 // Phase 3 (Merge):            One agent merges all completed branches into
 //                             the current branch.
@@ -31,7 +29,7 @@ import { execFileSync } from "node:child_process";
 // SANDCASTLE_AGENT={codex,claude} selects provider per invocation. Codex
 // path uses gpt-5.3-codex high effort across all phases. Claude path uses
 // Opus 4.7 max effort for the planner and Sonnet 4.6 high effort for the
-// volume phases (implementer/reviewer/merger).
+// volume phases (implementer/merger).
 const SANDCASTLE_AGENT =
   (process.env.SANDCASTLE_AGENT as "codex" | "claude" | undefined) ?? "codex";
 if (SANDCASTLE_AGENT !== "codex" && SANDCASTLE_AGENT !== "claude") {
@@ -177,11 +175,10 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
   }
 
   // -------------------------------------------------------------------------
-  // Phase 2: Execute + Review
+  // Phase 2: Execute
   //
-  // Per issue, createSandbox() so implementer + reviewer share the same
-  // sandbox per branch. Implementer runs first; if it produces commits the
-  // reviewer runs in the same sandbox.
+  // Per issue, createSandbox() so the implementer gets its own sandbox per
+  // branch. Implementer runs and produces commits.
   //
   // Promise.allSettled means one failing pipeline doesn't cancel the others.
   // -------------------------------------------------------------------------
@@ -205,27 +202,6 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
             BRANCH: issue.branch,
           },
         });
-
-        if (implement.commits.length > 0) {
-          const review = await sandbox.run({
-            name: "reviewer",
-            // 5 iterations: enough room for the reviewer's narrow job
-            // (read diff, maybe one fast verification, one commit) without
-            // enabling deep rabbit-holes — the prompt pins scope.
-            maxIterations: 5,
-            agent: workAgent(),
-            promptFile: "./.sandcastle/review-prompt.md",
-            promptArgs: {
-              BRANCH: issue.branch,
-            },
-          });
-
-          // Merge commits from both runs so the merge phase sees all of them.
-          return {
-            ...review,
-            commits: [...implement.commits, ...review.commits],
-          };
-        }
 
         return implement;
       } finally {
