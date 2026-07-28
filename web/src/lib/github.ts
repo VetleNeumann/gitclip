@@ -24,7 +24,22 @@ export interface CompareFile {
   filename: string;
   status: 'added' | 'modified' | 'removed' | 'renamed' | 'copied' | 'changed' | 'unchanged';
   previous_filename?: string;
-  sha?: string;
+  /** Blob sha at head. GitHub nulls this out when the entry has no content diff. */
+  sha?: string | null;
+  changes?: number;
+}
+
+/**
+ * True when a compare entry records a change to a file's mode but not to its
+ * bytes: a `chmod +x` commit. GitHub reports those with a null blob sha and zero
+ * line changes, so there is nothing to fetch — and re-transporting the content
+ * would be pure waste. Two near misses this deliberately excludes: binary
+ * content edits also report `changes: 0`, but they keep their blob sha; and
+ * `renamed`/`added` entries need their own ops (a delete of the old path, a
+ * write of the new one), so only `modified` qualifies.
+ */
+export function isModeOnlyChange(f: CompareFile): boolean {
+  return (f.sha === null || f.sha === undefined) && f.changes === 0 && f.status === 'modified';
 }
 
 export class GitHubError extends Error {
@@ -192,6 +207,11 @@ export async function getMergeBase(
   return data.merge_base_commit.sha;
 }
 
+/** Percent-encodes each segment of a repo path, leaving the `/` separators intact. */
+function encodePath(path: string): string {
+  return path.split('/').map(encodeURIComponent).join('/');
+}
+
 function decodeBase64(s: string): Uint8Array {
   const cleaned = s.replace(/\s/g, '');
   const binary = atob(cleaned);
@@ -204,32 +224,69 @@ export async function getFileContent(
   ref: RepoRef,
   path: string,
   sha: string,
-  blobSha: string | undefined,
+  blobSha: string | null | undefined,
   pat?: string | null,
 ): Promise<Uint8Array> {
+  let resolvedBlobSha = blobSha;
   // Primary: contents API — works up to 1MB.
   try {
-    const data = await ghFetch<{ content: string; encoding: string; size: number }>(
-      `/repos/${ref.owner}/${ref.repo}/contents/${path
-        .split('/')
-        .map(encodeURIComponent)
-        .join('/')}?ref=${encodeURIComponent(sha)}`,
+    const data = await ghFetch<{ content: string; encoding: string; size: number; sha?: string }>(
+      `/repos/${ref.owner}/${ref.repo}/contents/${encodePath(path)}?ref=${encodeURIComponent(sha)}`,
       pat,
     );
     if (data.encoding === 'base64' && data.content) return decodeBase64(data.content);
+    // Files over 1MB come back as HTTP 200 with an empty body and encoding
+    // "none" rather than an error. The response still carries the blob sha, so
+    // use it — the compare entry's sha may be null (mode-only change).
+    if (data.sha) resolvedBlobSha = data.sha;
   } catch (err) {
     const isBlockableHttp = err instanceof GitHubError && (err.status === 403 || err.status === 404);
     const isNetworkBlocked = err instanceof TypeError;
     if (!isBlockableHttp && !isNetworkBlocked) throw err;
   }
   // Fallback: git blob API by sha — handles >1MB files.
-  if (!blobSha) {
+  if (!resolvedBlobSha) {
     throw new GitHubError(0, `cannot fetch ${path} at ${sha} (no blob sha for fallback)`);
   }
   const blob = await ghFetch<{ content: string; encoding: string }>(
-    `/repos/${ref.owner}/${ref.repo}/git/blobs/${blobSha}`,
+    `/repos/${ref.owner}/${ref.repo}/git/blobs/${resolvedBlobSha}`,
     pat,
   );
   if (blob.encoding !== 'base64') throw new GitHubError(0, `unexpected blob encoding ${blob.encoding}`);
   return decodeBase64(blob.content);
+}
+
+/**
+ * Whether `path` is executable at `sha`, read from its parent directory's tree —
+ * one request per directory, and the compare entry for a mode-only change
+ * carries no mode of its own. Throws rather than guessing: the mode *is* the
+ * whole content of such a commit, so a rate-limited read, a truncated tree, or a
+ * mode chmod cannot express (a symlink or submodule) must abort script
+ * generation the way every other failed fetch in this flow does. Silently
+ * dropping the op would hand the user a script that omits the only thing the
+ * commit did.
+ */
+export async function getExecutableBit(
+  ref: RepoRef,
+  sha: string,
+  path: string,
+  pat?: string | null,
+): Promise<boolean> {
+  const slash = path.lastIndexOf('/');
+  const dir = slash === -1 ? '' : path.slice(0, slash);
+  const base = slash === -1 ? path : path.slice(slash + 1);
+  // The `<sha>:<dir>` tree-ish form needs its separators left intact, so encode
+  // per path segment the way the contents API call above does.
+  const treeRef = dir ? `${encodeURIComponent(sha)}:${encodePath(dir)}` : encodeURIComponent(sha);
+  const data = await ghFetch<{
+    tree?: { path: string; mode: string; type: string }[];
+    truncated?: boolean;
+  }>(`/repos/${ref.owner}/${ref.repo}/git/trees/${treeRef}`, pat);
+  const mode = data.tree?.find((e) => e.path === base)?.mode;
+  if (mode === '100644') return false;
+  if (mode === '100755') return true;
+  if (mode === undefined && data.truncated) {
+    throw new GitHubError(0, `cannot read mode of ${path} at ${sha} (tree listing was truncated)`);
+  }
+  throw new GitHubError(0, `unsupported mode ${mode ?? '(absent)'} for ${path} at ${sha}`);
 }

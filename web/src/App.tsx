@@ -10,10 +10,12 @@ import {
   resolveCommitSha,
   compareCommits,
   getBranchHead,
+  getExecutableBit,
   getFileContent,
   getMergeBase,
   getRepoMeta,
   GitHubError,
+  isModeOnlyChange,
   listBranches,
   listCommits,
   parseRepoUrl,
@@ -497,6 +499,12 @@ export default function App() {
           result = [{ kind: 'remove', path: f.filename }];
         } else if (f.status === 'unchanged') {
           result = [];
+        } else if (isModeOnlyChange(f)) {
+          // A chmod-only commit: the bytes are identical, so fetching and
+          // base64-ing the file would ship it in full for no reason. Carry the
+          // mode change on its own instead.
+          const executable = await getExecutableBit(ref, headSha, f.filename, pat);
+          result = [{ kind: 'chmod', path: f.filename, executable }];
         } else if (f.status === 'renamed' && f.previous_filename) {
           const content = await getFileContent(ref, f.filename, headSha, f.sha, pat);
           result = [

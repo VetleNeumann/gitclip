@@ -155,4 +155,42 @@ describe('generateScripts', () => {
     expect(bash).toContain("_gc_expect='abc1234'");
     expect(powershell).toContain("$_gcExpect = 'abc1234'");
   });
+
+  it('emits chmod ops without re-transporting file contents', () => {
+    const { bash, powershell } = generateScripts({
+      ops: [
+        { kind: 'chmod', path: 'scripts/build.sh', executable: true },
+        { kind: 'chmod', path: 'scripts/notes.md', executable: false },
+      ],
+      targetSha: TARGET,
+      fromSha: FROM,
+    });
+    expect(bash).toContain("chmod +x -- 'scripts/build.sh'");
+    expect(bash).toContain("chmod -x -- 'scripts/notes.md'");
+    expect(bash).not.toContain('GITCLIP_B64');
+    // NTFS has no executable bit, so PowerShell records the intent as a comment.
+    expect(powershell).toContain("# chmod +x 'scripts/build.sh'");
+    expect(powershell).toContain("# chmod -x 'scripts/notes.md'");
+    expect(powershell).not.toContain('_Gc-Write -Path');
+  });
+
+  it('quotes chmod paths containing single quotes', () => {
+    const { bash, powershell } = generateScripts({
+      ops: [{ kind: 'chmod', path: "we're/odd.sh", executable: true }],
+      targetSha: TARGET,
+      fromSha: FROM,
+    });
+    expect(bash).toContain(`chmod +x -- 'we'\\''re/odd.sh'`);
+    expect(powershell).toContain(`# chmod +x 'we''re/odd.sh'`);
+  });
+
+  it('rejects chmod ops with a path that escapes the repo', () => {
+    expect(() =>
+      generateScripts({
+        ops: [{ kind: 'chmod', path: '../outside.sh', executable: true }],
+        targetSha: TARGET,
+        fromSha: FROM,
+      }),
+    ).toThrow(/relative inside the repo/);
+  });
 });

@@ -13,8 +13,12 @@ The commit the user is currently at on the airgapped box. Persisted per-tab in `
 _Avoid_: base, current commit, head
 
 **Apply script**:
-A bash or PowerShell blob generated in the SPA from `…/compare/anchor...head`. Pasted into the airgapped terminal, it base64-decodes every changed file, deletes removed paths, and writes `.gitclip-head`. Always emitted in *both* shell flavors so the user picks at copy time.
+A bash or PowerShell blob generated in the SPA from `…/compare/anchor...head`. Pasted into the airgapped terminal, it base64-decodes every changed file, deletes removed paths, applies **mode-only changes**, and writes `.gitclip-head`. Always emitted in *both* shell flavors so the user picks at copy time.
 _Avoid_: patch, diff
+
+**Mode-only change**:
+A commit that changes a tracked file's executable bit without touching its bytes — `chmod +x` and nothing else. GitHub reports it with a null blob sha and zero line changes, which is how the SPA recognises it. Carried as a `chmod` op rather than a rewrite, so a 42 MB binary that gained its exec bit costs a one-line script rather than a 56 MB paste. Bash applies it with `chmod ±x`; PowerShell renders it as a comment, since NTFS has no executable bit.
+_Avoid_: metadata change, permission diff, empty diff
 
 **Log buffer**:
 The airgapped → laptop flow. The user pastes logs / stack traces / errors into the SPA; the laptop's Claude Code reads them via the `read_buffer` MCP tool. Atomically cleared on read.

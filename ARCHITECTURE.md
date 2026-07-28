@@ -82,7 +82,14 @@ These workflows share nothing except the deployment target and the session UUID,
 5. When HEAD advances past the visible window's `commits[0].sha`, the SPA re-fetches the commit list (so the graph stays current) and surfaces a "Generate apply script" panel.
 6. On click: SPA calls `…/compare/:anchor...:head`, then for each changed file, fetches its content via `…/contents/{path}?ref=:head` (base64) — falling back to `…/git/blobs/:sha` for files larger than 1 MB.
 7. `lib/scriptGen.ts` emits two scripts: bash (heredoc'd base64) and PowerShell (`[Convert]::FromBase64String` + `[IO.File]::WriteAllBytes`). The user copies whichever flavour they want.
-8. Pasted into the airgapped terminal, the script `mkdir -p`s every directory, base64-decodes every file, deletes removed files, and writes the new SHA to `.gitclip-head`.
+8. Pasted into the airgapped terminal, the script `mkdir -p`s every directory, base64-decodes every file, deletes removed files, applies mode-only changes with `chmod`, and writes the new SHA to `.gitclip-head`.
+
+Two GitHub API quirks shape step 6, both of which used to abort script generation outright:
+
+- **Files over 1 MB do not fail — they come back empty.** `…/contents/{path}` answers HTTP 200 with `encoding: "none"` and an empty `content`, not an error. The response still carries the file's blob sha, so `getFileContent` reads it from there and re-requests via `…/git/blobs/:sha` (good to 100 MB).
+- **A mode-only commit carries no blob sha at all.** `chmod +x` on a tracked file produces a compare entry with `sha: null` and `changes: 0`, because nothing about the bytes changed. `isModeOnlyChange` recognises that triple (it also requires `status: modified`, so renames and additions keep their own delete/write ops) and `getExecutableBit` reads the new mode from `…/git/trees/:head::dir` instead, emitting a `chmod` op. Re-transporting the content would be pure waste — for a 42 MB vendored binary that is a ~56 MB paste to convey one permission bit. Binary content edits also report `changes: 0`, but they keep their blob sha, which is what separates the two cases. A mode that `chmod` cannot express (symlink, submodule), a truncated tree, or a rate-limited read all abort generation rather than silently drop the op: for such a commit the mode *is* the entire payload.
+
+PowerShell renders `chmod` ops as comments: NTFS has no executable bit, so there is nothing to apply on the Windows side.
 
 The non-obvious bit: **every file (text or binary) is encoded as base64**, not as a heredoc'd literal. This trades ~33% size growth for byte-exact reproduction with no escaping pitfalls (no quoting, no terminator collisions, no LF/CRLF surprise, no UTF-8 normalization). On the strictly-text-only side, both `base64` (Linux coreutils) and `[Convert]::FromBase64String` (Windows .NET, in-process) ship with the OS.
 

@@ -1,6 +1,7 @@
 export type FileOp =
   | { kind: 'write'; path: string; content: Uint8Array }
-  | { kind: 'remove'; path: string };
+  | { kind: 'remove'; path: string }
+  | { kind: 'chmod'; path: string; executable: boolean };
 
 export interface GenerateInput {
   ops: FileOp[];
@@ -124,6 +125,8 @@ function emitBash(ops: FileOp[], targetSha: string, fromSha: string): string {
   for (const op of ops) {
     if (op.kind === 'remove') {
       out.push(`rm -f -- ${bashSingleQuote(op.path)}`);
+    } else if (op.kind === 'chmod') {
+      out.push(`chmod ${op.executable ? '+x' : '-x'} -- ${bashSingleQuote(op.path)}`);
     } else {
       const lines = chunked(toBase64(op.content));
       out.push(`_gc_write ${bashSingleQuote(op.path)} <<'GITCLIP_B64'`);
@@ -213,6 +216,11 @@ function emitPowerShell(ops: FileOp[], targetSha: string, fromSha: string): stri
     if (op.kind === 'remove') {
       out.push(
         `Remove-Item -LiteralPath ${pwshSingleQuote(op.path)} -Force -ErrorAction SilentlyContinue`,
+      );
+    } else if (op.kind === 'chmod') {
+      // NTFS has no executable bit, so record the intent rather than emit a no-op.
+      out.push(
+        `# chmod ${op.executable ? '+x' : '-x'} ${pwshSingleQuote(op.path)} (no-op on Windows: NTFS has no executable bit)`,
       );
     } else {
       const b64 = toBase64(op.content);

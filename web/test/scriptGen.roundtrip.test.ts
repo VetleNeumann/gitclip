@@ -1,6 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  rmSync,
+  statSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateScripts } from '../src/lib/scriptGen';
@@ -58,6 +66,37 @@ describe('round-trip: generated bash script applied in a temp dir', () => {
       expect(new Uint8Array(readFileSync(join(root, 'assets/logo.bin')))).toEqual(binary);
       expect(new Uint8Array(readFileSync(join(root, 'pre/replace.txt')))).toEqual(replacement);
       expect(existsSync(join(root, 'pre/remove.txt'))).toBe(false);
+      expect(readFileSync(join(root, '.gitclip-head'), 'utf8').trim()).toBe(TARGET);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('applies mode-only changes without rewriting file contents', () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitclip-rt-'));
+    try {
+      writeFileSync(join(root, '.gitclip-head'), `${FROM}\n`);
+      writeFileSync(join(root, 'vendored.bin'), 'unchanged bytes', { mode: 0o644 });
+      writeFileSync(join(root, 'nolonger.sh'), '#!/bin/sh\n', { mode: 0o755 });
+
+      const { bash } = generateScripts({
+        ops: [
+          { kind: 'chmod', path: 'vendored.bin', executable: true },
+          { kind: 'chmod', path: 'nolonger.sh', executable: false },
+        ],
+        targetSha: TARGET,
+        fromSha: FROM,
+      });
+      // The whole point: no content is carried for a mode-only change.
+      expect(bash).not.toContain('GITCLIP_B64');
+
+      const scriptPath = join(root, 'apply.sh');
+      writeFileSync(scriptPath, bash);
+      execFileSync('bash', [scriptPath], { cwd: root, stdio: 'pipe' });
+
+      expect(statSync(join(root, 'vendored.bin')).mode & 0o111).not.toBe(0);
+      expect(statSync(join(root, 'nolonger.sh')).mode & 0o111).toBe(0);
+      expect(readFileSync(join(root, 'vendored.bin'), 'utf8')).toBe('unchanged bytes');
       expect(readFileSync(join(root, '.gitclip-head'), 'utf8').trim()).toBe(TARGET);
     } finally {
       rmSync(root, { recursive: true, force: true });
