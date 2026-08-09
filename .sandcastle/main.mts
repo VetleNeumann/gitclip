@@ -45,6 +45,11 @@ if (!GH_TOKEN) {
   );
 }
 
+// Each leg carries its own agent credential, fetched from Vaultwarden by the
+// `sandcastle` wrapper (ADR-0055 owns env prep, ADR-0058 owns the credential
+// boundary). codex needs the API key on the host so the in-sandbox `codex login`
+// hook can stdin-pipe it; claude needs the long-lived OAuth token so the
+// in-sandbox CLI can authenticate without the operator's own credentials file.
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 if (SANDCASTLE_AGENT === "codex" && !OPENAI_API_KEY) {
   throw new Error(
@@ -63,6 +68,19 @@ const workAgent = () =>
     : sandcastle.codex("gpt-5.3-codex", { effort: "high" });
 
 // Maximum number of plan→execute→merge cycles before stopping.
+// Fail closed, with no fallback to mounting ~/.claude/.credentials.json. That
+// mount is what this check replaces: its refresh token rotates on use, so N
+// sandboxes refreshing off one copy replayed a consumed token and the server
+// revoked the whole family, taking the operator's own session down with the run.
+// A fallback would fire on exactly the day the vault item was forgotten and
+// silently re-arm that trap. Mint with `claude setup-token` (valid one year).
+const CLAUDE_CODE_OAUTH_TOKEN = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+if (SANDCASTLE_AGENT === "claude" && !CLAUDE_CODE_OAUTH_TOKEN) {
+  throw new Error(
+    "CLAUDE_CODE_OAUTH_TOKEN is not set on the host. Run sandcastle through the `sandcastle` wrapper, which reads it from Vaultwarden, or export it yourself before running main.mts directly.",
+  );
+}
+
 const MAX_ITERATIONS = 10;
 
 const hostRepoDir = process.cwd();
@@ -72,7 +90,6 @@ const hostRepoDir = process.cwd();
 // `sh -c` can branch on it.
 // - npm install: hydrates root + workspaces (web, mcp, netlify/functions).
 // - codex login: feeds OPENAI_API_KEY to codex CLI; skipped on claude.
-// - claude auth: confirms ~/.claude/.credentials.json bind-mounted in.
 // - gh auth + force HTTPS origin: both providers need gh credentials and
 //   HTTPS push routing through the credential helper.
 const hooks = {
@@ -83,9 +100,14 @@ const hooks = {
         command:
           'sh -c \'[ "$SANDCASTLE_AGENT" = "claude" ] || printenv OPENAI_API_KEY | codex login --with-api-key\'',
       },
+      // claude auth: confirm the agent credential arrived and that nothing
+      // outranks it — ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN both beat
+      // CLAUDE_CODE_OAUTH_TOKEN in the CLI's auth precedence. Catches a missing
+      // or shadowed credential, not a CLI that ignores the variable (bare mode
+      // does not read it at all). Skipped on codex. See ADR-0058.
       {
         command:
-          'sh -c \'[ "$SANDCASTLE_AGENT" = "codex" ] || test -f "$HOME/.claude/.credentials.json" || { echo "claude: ~/.claude/.credentials.json missing inside sandbox; check ro mount" >&2; exit 1; }\'',
+          'sh -c \'[ "$SANDCASTLE_AGENT" = "codex" ] || { [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] || { echo "claude: CLAUDE_CODE_OAUTH_TOKEN empty inside sandbox; the host preflight should have caught this" >&2; exit 1; }; [ -z "$ANTHROPIC_API_KEY$ANTHROPIC_AUTH_TOKEN" ] || { echo "claude: ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN set inside sandbox; they outrank CLAUDE_CODE_OAUTH_TOKEN" >&2; exit 1; }; }\'',
       },
       {
         command:
@@ -101,19 +123,14 @@ const hooks = {
   },
 };
 
-// Mount the host's OAuth credentials file (only) into the sandbox when the
-// claude provider is active. Whole-dir ro mount blocks claude from writing
-// session JSONL under ~/.claude/projects/ and trips session-capture.
-const claudeMount =
-  SANDCASTLE_AGENT === "claude"
-    ? [
-        {
-          hostPath: "~/.claude/.credentials.json",
-          sandboxPath: "~/.claude/.credentials.json",
-          readonly: true,
-        },
-      ]
-    : [];
+// Nothing from ~/.claude is mounted. The operator's own credentials file used to
+// be bind-mounted read-only here; it is the one thing that must never cross the
+// container boundary, because its refresh token rotates on use and N sandboxes
+// sharing one copy revoke the whole token family — the operator included. Both
+// legs now authenticate with their own credential from sandboxEnv instead, and
+// nothing else under ~/.claude is read at runtime, so the mount had no other job.
+// See ADR-0058.
+const claudeMount: never[] = [];
 
 const sandboxEnv: Record<string, string> = {
   SANDCASTLE_AGENT,
@@ -121,6 +138,8 @@ const sandboxEnv: Record<string, string> = {
 };
 if (SANDCASTLE_AGENT === "codex") {
   sandboxEnv.OPENAI_API_KEY = OPENAI_API_KEY!;
+} else {
+  sandboxEnv.CLAUDE_CODE_OAUTH_TOKEN = CLAUDE_CODE_OAUTH_TOKEN!;
 }
 
 const worktreeSandbox = podman({
