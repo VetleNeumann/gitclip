@@ -139,6 +139,8 @@ describe('generateScripts', () => {
     expect(bash).toContain('GITCLIP_FORCE');
     expect(bash).toContain('paste expects');
     expect(bash).toContain('9<>/dev/tty');
+    // The anchor read must strip a UTF-8 BOM, not just whitespace.
+    expect(bash).toContain("tr -d '\\357\\273\\277[:space:]'");
     // pwsh guard
     expect(powershell).toContain("$_gcExpect = 'abc1234'");
     expect(powershell).toContain('GITCLIP_FORCE');

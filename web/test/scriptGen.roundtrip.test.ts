@@ -25,6 +25,7 @@ function bashAvailable(): boolean {
 }
 
 const FROM = '0000001234567890';
+const BOM = Buffer.from([0xef, 0xbb, 0xbf]);
 const TARGET = 'cafef00d';
 
 describe('round-trip: generated bash script applied in a temp dir', () => {
@@ -235,6 +236,33 @@ describe('round-trip: generated bash script applied in a temp dir', () => {
       expect(readFileSync(join(root, 'top.txt'), 'utf8')).toBe('top');
       expect(existsSync(join(sub, 'top.txt'))).toBe(false);
       expect(readFileSync(join(root, '.gitclip-head'), 'utf8').trim()).toBe(TARGET);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts an anchor carrying a UTF-8 BOM, and rewrites it without one', () => {
+    // Windows PowerShell 5.1's `Set-Content -Encoding utf8` writes a BOM, so an
+    // anchor committed from that side arrives here as EF BB BF + SHA. The guard
+    // used to strip only [:space:], which does not match a BOM: the SHA then
+    // compared unequal to itself and every paste was refused.
+    const root = mkdtempSync(join(tmpdir(), 'gitclip-rt-'));
+    try {
+      writeFileSync(join(root, '.gitclip-head'), Buffer.concat([BOM, Buffer.from(FROM)]));
+      const { bash } = generateScripts({
+        ops: [{ kind: 'write', path: 'bom.txt', content: enc.encode('applied') }],
+        targetSha: TARGET,
+        fromSha: FROM,
+      });
+      const scriptPath = join(root, 'apply.sh');
+      writeFileSync(scriptPath, bash);
+      execFileSync('bash', [scriptPath], { cwd: root, stdio: 'pipe' });
+      expect(readFileSync(join(root, 'bom.txt'), 'utf8')).toBe('applied');
+
+      // The rewritten anchor is plain bytes, so the BOM does not survive a sync.
+      const rewritten = readFileSync(join(root, '.gitclip-head'));
+      expect(rewritten.subarray(0, 3).equals(BOM)).toBe(false);
+      expect(rewritten.toString('utf8').trim()).toBe(TARGET);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
