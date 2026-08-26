@@ -79,7 +79,15 @@ function emitBash(ops: FileOp[], targetSha: string, fromSha: string): string {
   out.push('done');
   out.push('');
   out.push('if [ -n "$_gc_anchor" ]; then');
-  out.push('  _gc_found=$(tr -d "[:space:]" < "$_gc_anchor" | tr "[:upper:]" "[:lower:]")');
+  // Strip a UTF-8 BOM (EF BB BF) as well as whitespace. A .gitclip-head written
+  // by Windows PowerShell 5.1's `Set-Content -Encoding utf8` carries one, and
+  // `[:space:]` does not match it -- so a byte-identical SHA compared unequal
+  // and every paste was refused, with an error naming the same SHA twice.
+  // LC_ALL=C keeps the octal escapes byte-literal rather than letting the
+  // locale decide what they decode to.
+  out.push(
+    '  _gc_found=$(LC_ALL=C tr -d \'\\357\\273\\277[:space:]\' < "$_gc_anchor" | tr "[:upper:]" "[:lower:]")',
+  );
   out.push('  _gc_match=0');
   out.push('  case "$_gc_found" in "$_gc_expect"*) _gc_match=1 ;; esac');
   out.push('  case "$_gc_expect" in "$_gc_found"*) _gc_match=1 ;; esac');
@@ -167,7 +175,12 @@ function emitPowerShell(ops: FileOp[], targetSha: string, fromSha: string): stri
   out.push('}');
   out.push('');
   out.push('if ($_gcAnchor) {');
-  out.push('  $_gcFound = ((Get-Content -LiteralPath $_gcAnchor -Raw) -replace "\\s","").ToLower()');
+  // \uFEFF alongside \s for the same reason the bash branch strips a BOM.
+  // `Get-Content -Raw` already drops one it recognises, so this only matters
+  // for an anchor whose BOM survived into the decoded string.
+  out.push(
+    '  $_gcFound = ((Get-Content -LiteralPath $_gcAnchor -Raw) -replace "[\\s\\uFEFF]","").ToLower()',
+  );
   out.push('  $_gcMatch = $_gcFound.StartsWith($_gcExpect) -or $_gcExpect.StartsWith($_gcFound)');
   out.push('  if (-not $_gcMatch) {');
   out.push('    if ($_gcForce) {');
