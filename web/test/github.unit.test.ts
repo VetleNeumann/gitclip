@@ -12,63 +12,80 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-function b64(s: string): string {
-  return Buffer.from(s, 'utf8').toString('base64');
-}
-
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+function raw(body: BodyInit, status = 200): Response {
+  return new Response(body, {
+    status,
+    headers: { 'content-type': 'application/vnd.github.raw; charset=utf-8' },
+  });
+}
+
+function acceptOf(init: RequestInit | undefined): string | undefined {
+  return (init?.headers as Record<string, string> | undefined)?.accept;
+}
+
 describe('getFileContent', () => {
-  it('returns inline base64 content when the contents API inlines it', async () => {
-    const fetchMock = vi.fn(async () =>
-      json({ content: b64('hello\n'), encoding: 'base64', size: 6, sha: BLOB_SHA }),
-    );
+  it('reads the contents API with the raw media type, never the base64 JSON envelope', async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => raw('hello\n'));
     vi.stubGlobal('fetch', fetchMock);
 
     const bytes = await getFileContent(REF, 'a.txt', HEAD, BLOB_SHA);
 
     expect(new TextDecoder().decode(bytes)).toBe('hello\n');
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![0]).toContain(`/contents/a.txt?ref=${HEAD}`);
+    expect(acceptOf(fetchMock.mock.calls[0]![1])).toBe('application/vnd.github.raw');
   });
 
-  it('falls back to the blob sha carried by a 200 contents response with encoding "none"', async () => {
-    // Files over 1 MB come back as HTTP 200 with an empty body and encoding
-    // "none" — the response still carries the blob sha the blobs API needs.
-    const urls: string[] = [];
-    const fetchMock = vi.fn(async (url: string) => {
-      urls.push(url);
-      if (url.includes('/contents/')) {
-        return json({ content: '', encoding: 'none', size: 42_243_803, sha: BLOB_SHA });
-      }
-      return json({ content: b64('big payload'), encoding: 'base64' });
-    });
-    vi.stubGlobal('fetch', fetchMock);
+  it('returns binary bytes unaltered', async () => {
+    const every = Uint8Array.from({ length: 256 }, (_, i) => i);
+    vi.stubGlobal('fetch', vi.fn(async () => raw(every)));
 
-    // No blob sha from the compare entry — a mode-only commit nulls it out.
-    const bytes = await getFileContent(REF, 'big.bin', HEAD, undefined);
+    const bytes = await getFileContent(REF, 'blob.bin', HEAD, BLOB_SHA);
 
-    expect(new TextDecoder().decode(bytes)).toBe('big payload');
-    expect(urls[1]).toContain(`/git/blobs/${BLOB_SHA}`);
+    expect([...bytes]).toEqual([...every]);
   });
 
-  it('still falls back on a 403 from the contents API using the compare blob sha', async () => {
-    const urls: string[] = [];
-    const fetchMock = vi.fn(async (url: string) => {
-      urls.push(url);
-      if (url.includes('/contents/')) return json({ message: 'too large' }, 403);
-      return json({ content: b64('from blob'), encoding: 'base64' });
-    });
-    vi.stubGlobal('fetch', fetchMock);
+  it('falls back to the raw blob on a 403 from the contents API', async () => {
+    const calls: [string, string | undefined][] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push([url, acceptOf(init)]);
+        if (url.includes('/contents/')) return json({ message: 'too large' }, 403);
+        return raw('from blob');
+      }),
+    );
 
     const bytes = await getFileContent(REF, 'big.bin', HEAD, BLOB_SHA);
 
     expect(new TextDecoder().decode(bytes)).toBe('from blob');
-    expect(urls[1]).toContain(`/git/blobs/${BLOB_SHA}`);
+    expect(calls[1]).toEqual([
+      expect.stringContaining(`/git/blobs/${BLOB_SHA}`),
+      'application/vnd.github.raw',
+    ]);
   });
 
-  it('throws when neither the compare entry nor the contents response yields a blob sha', async () => {
+  it('falls back to the raw blob when the contents fetch dies at the network layer', async () => {
+    // What an inspecting proxy that cuts the response mid-body looks like from
+    // the page: fetch rejects with a bare TypeError.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.includes('/contents/')) throw new TypeError('Failed to fetch');
+        return raw('from blob');
+      }),
+    );
+
+    const bytes = await getFileContent(REF, 'a.ps1', HEAD, BLOB_SHA);
+
+    expect(new TextDecoder().decode(bytes)).toBe('from blob');
+  });
+
+  it('throws when the contents API fails and the compare entry carries no blob sha', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => json({ message: 'not found' }, 404)),
@@ -79,20 +96,13 @@ describe('getFileContent', () => {
     );
   });
 
-  it('rejects a blob response that is not base64', async () => {
+  it('rethrows a contents API error that a fallback cannot cure', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async (url: string) => {
-        if (url.includes('/contents/')) {
-          return json({ content: '', encoding: 'none', size: 2_000_000, sha: BLOB_SHA });
-        }
-        return json({ content: '', encoding: 'utf-8' });
-      }),
+      vi.fn(async () => json({ message: 'boom' }, 500)),
     );
 
-    await expect(getFileContent(REF, 'big.bin', HEAD, undefined)).rejects.toThrow(
-      'unexpected blob encoding utf-8',
-    );
+    await expect(getFileContent(REF, 'a.txt', HEAD, BLOB_SHA)).rejects.toThrow(/^500 /);
   });
 });
 

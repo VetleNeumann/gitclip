@@ -212,14 +212,26 @@ function encodePath(path: string): string {
   return path.split('/').map(encodeURIComponent).join('/');
 }
 
-function decodeBase64(s: string): Uint8Array {
-  const cleaned = s.replace(/\s/g, '');
-  const binary = atob(cleaned);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
-  return out;
+/** Fetches a file's bytes as the raw media type: the body is the file itself. */
+async function ghFetchRaw(path: string, pat?: string | null): Promise<Uint8Array> {
+  const res = await fetch(`${API}${path}`, {
+    headers: { ...authHeaders(pat), accept: 'application/vnd.github.raw' },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new GitHubError(res.status, `${res.status} ${res.statusText} on ${path} — ${body.slice(0, 200)}`);
+  }
+  return new Uint8Array(await res.arrayBuffer());
 }
 
+/**
+ * A file's bytes at `sha`. Both routes ask for the raw media type, never the
+ * default JSON envelope with base64 content: a TLS-inspecting proxy was seen to
+ * decode the base64 inside such a response and cut the connection mid-body when
+ * its scanner disliked the result (a `WScript.Shell` Startup-folder shortcut in
+ * a .ps1 was enough), while passing the same bytes served raw. Raw also lifts
+ * the contents API's 1MB inline limit to 100MB.
+ */
 export async function getFileContent(
   ref: RepoRef,
   path: string,
@@ -227,33 +239,21 @@ export async function getFileContent(
   blobSha: string | null | undefined,
   pat?: string | null,
 ): Promise<Uint8Array> {
-  let resolvedBlobSha = blobSha;
-  // Primary: contents API — works up to 1MB.
   try {
-    const data = await ghFetch<{ content: string; encoding: string; size: number; sha?: string }>(
+    return await ghFetchRaw(
       `/repos/${ref.owner}/${ref.repo}/contents/${encodePath(path)}?ref=${encodeURIComponent(sha)}`,
       pat,
     );
-    if (data.encoding === 'base64' && data.content) return decodeBase64(data.content);
-    // Files over 1MB come back as HTTP 200 with an empty body and encoding
-    // "none" rather than an error. The response still carries the blob sha, so
-    // use it — the compare entry's sha may be null (mode-only change).
-    if (data.sha) resolvedBlobSha = data.sha;
   } catch (err) {
     const isBlockableHttp = err instanceof GitHubError && (err.status === 403 || err.status === 404);
     const isNetworkBlocked = err instanceof TypeError;
     if (!isBlockableHttp && !isNetworkBlocked) throw err;
   }
-  // Fallback: git blob API by sha — handles >1MB files.
-  if (!resolvedBlobSha) {
+  // Fallback: git blob API by sha.
+  if (!blobSha) {
     throw new GitHubError(0, `cannot fetch ${path} at ${sha} (no blob sha for fallback)`);
   }
-  const blob = await ghFetch<{ content: string; encoding: string }>(
-    `/repos/${ref.owner}/${ref.repo}/git/blobs/${resolvedBlobSha}`,
-    pat,
-  );
-  if (blob.encoding !== 'base64') throw new GitHubError(0, `unexpected blob encoding ${blob.encoding}`);
-  return decodeBase64(blob.content);
+  return ghFetchRaw(`/repos/${ref.owner}/${ref.repo}/git/blobs/${blobSha}`, pat);
 }
 
 /**
