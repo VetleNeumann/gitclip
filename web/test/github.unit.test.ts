@@ -1,9 +1,16 @@
+import { createHash } from 'node:crypto';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { getExecutableBit, getFileContent } from '../src/lib/github';
 
 const REF = { owner: 'acme', repo: 'widgets' };
 const HEAD = 'c'.repeat(40);
 const BLOB_SHA = '436f4549ac4564a280ed8241efccbce31e215eea';
+
+/** The sha git gives `content` as a blob — what a compare entry carries. */
+function blobSha(content: string | Uint8Array): string {
+  const bytes = typeof content === 'string' ? Buffer.from(content, 'utf8') : Buffer.from(content);
+  return createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+}
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -27,12 +34,15 @@ function acceptOf(init: RequestInit | undefined): string | undefined {
   return (init?.headers as Record<string, string> | undefined)?.accept;
 }
 
+const HELLO_SHA = blobSha('hello\n');
+const FROM_BLOB_SHA = blobSha('from blob');
+
 describe('getFileContent', () => {
   it('reads the contents API with the raw media type, never the base64 JSON envelope', async () => {
     const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => raw('hello\n'));
     vi.stubGlobal('fetch', fetchMock);
 
-    const bytes = await getFileContent(REF, 'a.txt', HEAD, BLOB_SHA);
+    const bytes = await getFileContent(REF, 'a.txt', HEAD, HELLO_SHA);
 
     expect(new TextDecoder().decode(bytes)).toBe('hello\n');
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -40,11 +50,40 @@ describe('getFileContent', () => {
     expect(acceptOf(fetchMock.mock.calls[0]![1])).toBe('application/vnd.github.raw');
   });
 
+  it('bypasses every HTTP cache', async () => {
+    // GitHub marks these responses cacheable for a day, and a cache that
+    // ignores `Vary: Accept` answered raw requests with the JSON envelope it
+    // had stored for the same URL.
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => raw('hello\n'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await getFileContent(REF, 'a.txt', HEAD, HELLO_SHA);
+
+    expect(fetchMock.mock.calls[0]![1]?.cache).toBe('no-store');
+  });
+
+  it('rejects bytes that do not hash to the compare entry blob sha', async () => {
+    const envelope = JSON.stringify({ name: 'a.txt', path: 'a.txt', content: 'aGVsbG8K' }, null, 2);
+    vi.stubGlobal('fetch', vi.fn(async () => raw(envelope)));
+
+    await expect(getFileContent(REF, 'a.txt', HEAD, HELLO_SHA)).rejects.toThrow(
+      `a.txt at ${HEAD}: got blob ${blobSha(envelope)}, expected ${HELLO_SHA}`,
+    );
+  });
+
+  it('returns unverified bytes when the compare entry carries no blob sha', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => raw('hello\n')));
+
+    const bytes = await getFileContent(REF, 'a.txt', HEAD, null);
+
+    expect(new TextDecoder().decode(bytes)).toBe('hello\n');
+  });
+
   it('returns binary bytes unaltered', async () => {
     const every = Uint8Array.from({ length: 256 }, (_, i) => i);
     vi.stubGlobal('fetch', vi.fn(async () => raw(every)));
 
-    const bytes = await getFileContent(REF, 'blob.bin', HEAD, BLOB_SHA);
+    const bytes = await getFileContent(REF, 'blob.bin', HEAD, blobSha(every));
 
     expect([...bytes]).toEqual([...every]);
   });
@@ -60,11 +99,11 @@ describe('getFileContent', () => {
       }),
     );
 
-    const bytes = await getFileContent(REF, 'big.bin', HEAD, BLOB_SHA);
+    const bytes = await getFileContent(REF, 'big.bin', HEAD, FROM_BLOB_SHA);
 
     expect(new TextDecoder().decode(bytes)).toBe('from blob');
     expect(calls[1]).toEqual([
-      expect.stringContaining(`/git/blobs/${BLOB_SHA}`),
+      expect.stringContaining(`/git/blobs/${FROM_BLOB_SHA}`),
       'application/vnd.github.raw',
     ]);
   });
@@ -80,7 +119,7 @@ describe('getFileContent', () => {
       }),
     );
 
-    const bytes = await getFileContent(REF, 'a.ps1', HEAD, BLOB_SHA);
+    const bytes = await getFileContent(REF, 'a.ps1', HEAD, FROM_BLOB_SHA);
 
     expect(new TextDecoder().decode(bytes)).toBe('from blob');
   });

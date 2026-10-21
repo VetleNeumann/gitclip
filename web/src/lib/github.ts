@@ -212,10 +212,16 @@ function encodePath(path: string): string {
   return path.split('/').map(encodeURIComponent).join('/');
 }
 
-/** Fetches a file's bytes as the raw media type: the body is the file itself. */
+/**
+ * Fetches a file's bytes as the raw media type: the body is the file itself.
+ * `no-store` because GitHub marks these responses cacheable for a day, and a
+ * cache that ignored `Vary: Accept` was seen answering raw requests with the
+ * JSON envelope it had stored for the same URL.
+ */
 async function ghFetchRaw(path: string, pat?: string | null): Promise<Uint8Array> {
   const res = await fetch(`${API}${path}`, {
     headers: { ...authHeaders(pat), accept: 'application/vnd.github.raw' },
+    cache: 'no-store',
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
@@ -231,6 +237,10 @@ async function ghFetchRaw(path: string, pat?: string | null): Promise<Uint8Array
  * its scanner disliked the result (a `WScript.Shell` Startup-folder shortcut in
  * a .ps1 was enough), while passing the same bytes served raw. Raw also lifts
  * the contents API's 1MB inline limit to 100MB.
+ *
+ * When the compare entry carries a blob sha, the bytes are checked against it
+ * before they go anywhere near an apply script: whatever sits between here and
+ * GitHub has already proven willing to hand back something other than the file.
  */
 export async function getFileContent(
   ref: RepoRef,
@@ -239,8 +249,9 @@ export async function getFileContent(
   blobSha: string | null | undefined,
   pat?: string | null,
 ): Promise<Uint8Array> {
+  let bytes: Uint8Array;
   try {
-    return await ghFetchRaw(
+    bytes = await ghFetchRaw(
       `/repos/${ref.owner}/${ref.repo}/contents/${encodePath(path)}?ref=${encodeURIComponent(sha)}`,
       pat,
     );
@@ -248,12 +259,29 @@ export async function getFileContent(
     const isBlockableHttp = err instanceof GitHubError && (err.status === 403 || err.status === 404);
     const isNetworkBlocked = err instanceof TypeError;
     if (!isBlockableHttp && !isNetworkBlocked) throw err;
+    // Fallback: git blob API by sha.
+    if (!blobSha) {
+      throw new GitHubError(0, `cannot fetch ${path} at ${sha} (no blob sha for fallback)`);
+    }
+    bytes = await ghFetchRaw(`/repos/${ref.owner}/${ref.repo}/git/blobs/${blobSha}`, pat);
   }
-  // Fallback: git blob API by sha.
-  if (!blobSha) {
-    throw new GitHubError(0, `cannot fetch ${path} at ${sha} (no blob sha for fallback)`);
+  if (blobSha) {
+    const got = await gitBlobSha(bytes);
+    if (got !== blobSha) {
+      throw new GitHubError(0, `${path} at ${sha}: got blob ${got}, expected ${blobSha} — a cache or proxy altered the response`);
+    }
   }
-  return ghFetchRaw(`/repos/${ref.owner}/${ref.repo}/git/blobs/${blobSha}`, pat);
+  return bytes;
+}
+
+/** The sha git assigns `bytes` as a blob: SHA-1 over `blob <len>\0` + bytes. */
+async function gitBlobSha(bytes: Uint8Array): Promise<string> {
+  const header = new TextEncoder().encode(`blob ${bytes.length}\0`);
+  const buf = new Uint8Array(header.length + bytes.length);
+  buf.set(header);
+  buf.set(bytes, header.length);
+  const digest = await crypto.subtle.digest('SHA-1', buf);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 /**
